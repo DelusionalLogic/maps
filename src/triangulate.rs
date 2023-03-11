@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 
 #[derive(Clone,Copy,Debug)]
 pub struct Vector {
-    x: f64,
-    y: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Vector {
@@ -59,7 +60,7 @@ impl BBox {
     }
 }
 
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone,Copy,Debug,PartialEq)]
 struct TriSide {
     tri: usize,
     side: u8,
@@ -67,11 +68,61 @@ struct TriSide {
 
 #[derive(Debug)]
 pub struct Tris {
-    verts: Vec<Vector>,
-    tris: Vec<[usize; 3]>,
+    pub verts: Vec<Vector>,
+    pub tris: Vec<[usize; 3]>,
     edges: Vec<[usize; 2]>,
     adj: Vec<[Option<TriSide>; 3]>,
     inverse_tri: Vec<TriSide>,
+}
+
+fn build_adjecent(tris: &[[usize; 3]]) -> Vec<[Option<TriSide>; 3]> {
+    let mut adj : Vec<[Option<TriSide>; 3]> = vec![[None, None, None]; tris.len()];
+
+    // Calculate the adjecencies
+    {
+        let mut seen = HashMap::new();
+        let mut set_adj = |edge: TriSide| {
+            let e = (tris[edge.tri][anticlockwise(edge.side) as usize], tris[edge.tri][clockwise(edge.side) as usize]);
+            if let Some(opposite) = seen.remove(&e) {
+                assert!(adj[edge.tri][edge.side as usize].is_none());
+                adj[edge.tri][edge.side as usize] = Some(opposite);
+                assert!(adj[opposite.tri][opposite.side as usize].is_none());
+                adj[opposite.tri][opposite.side as usize] = Some(edge);
+            } else {
+                // Swap the edge direction to allow for the opposite side to do the lookup
+                seen.insert((e.1, e.0), edge);
+            }
+        };
+
+        for i in 0..tris.len() {
+            set_adj(TriSide{tri: i, side: 0});
+            set_adj(TriSide{tri: i, side: 1});
+            set_adj(TriSide{tri: i, side: 2});
+        }
+    }
+
+    return adj;
+}
+
+pub fn triangulate(xs: &[f64], ys: &[f64]) -> Tris {
+    let bbox = BBox::from_points(xs.to_vec(), ys.to_vec());
+
+    let mut tris = Tris::super_tri_of_bbox(&bbox, xs.len() as _);
+    assert!(xs.len() == ys.len());
+
+    let mut vid = Vec::with_capacity(xs.len());
+    for i in 0..xs.len() {
+        vid.push(
+            tris.add_point(&Vector{x: xs[i], y: ys[i]}).unwrap()
+        );
+    }
+
+    for i in 0..vid.len() {
+        let next = (i + 1) % vid.len();
+        tris.add_edge(vid[i], vid[next]);
+    }
+
+    return tris;
 }
 
 impl Tris {
@@ -129,6 +180,26 @@ impl Tris {
             adj,
             inverse_tri,
         };
+    }
+
+    fn explicit(verts: &[Vector], tris: &[[usize; 3]]) -> Self {
+        let adj = build_adjecent(tris);
+        let mut inverse_tri = vec![TriSide{tri: 0, side: 0}; verts.len()];
+
+        for i in 0..tris.len() {
+            inverse_tri[tris[i][0]] = TriSide{tri: i, side: 0};
+            inverse_tri[tris[i][1]] = TriSide{tri: i, side: 1};
+            inverse_tri[tris[i][2]] = TriSide{tri: i, side: 2};
+        }
+
+
+        return Tris {
+            verts: verts.to_vec(),
+            tris: tris.to_vec(),
+            edges: vec![],
+            adj,
+            inverse_tri,
+        }
     }
 
     fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Option<TriSide> {
@@ -248,7 +319,7 @@ impl Tris {
             let oppo_clock = clockwise(t_opt.side);
             let me_clock = clockwise(curs.side);
             let t_op_swap = anticlockwise(t_opt.side);
-            if incircle(self.verts[t_op[0]], self.verts[t_op[1]], self.verts[t_op[2]], &self.verts[t_op[tri.side as usize]]) {
+            if incircle(self.verts[t_op[0]].clone(), self.verts[t_op[1]].clone(), self.verts[t_op[2]].clone(), &self.verts[t_op[tri.side as usize]]) {
                 let t_me_swap = anticlockwise(curs.side);
 
                 let t3 = self.opposing_tri(&TriSide { tri: curs.tri, side: me_clock });
@@ -370,6 +441,160 @@ impl Tris {
         } else {
             return
         }
+
+        // Kill the inital tri
+        let mut dead_tris: Vec<usize> = vec![tri_cursor.tri];
+
+        // Walk the strip of triangles that are cut by the new edge until we arrive at v2i
+        loop {
+            // Get the next tri
+            let op_tri = self.opposing_tri(&tri_cursor).unwrap();
+            // Kill that tri
+            dead_tris.push(op_tri.tri);
+
+            // The new tri shared two vertecies with the old one, those have already been
+            // categorized. We need to categorize the new one opposite of the shared side
+
+            // If the vertex is v2, we are done walking the strip and can break the loop
+            if self.tris[op_tri.tri][op_tri.side as usize] == v2i {
+                // Add the final adjecencies
+                upper_adj.push(self.opposing_tri(&TriSide {tri: op_tri.tri, side: clockwise(op_tri.side)}));
+                lower_adj.push(self.opposing_tri(&TriSide {tri: op_tri.tri, side: anticlockwise(op_tri.side)}));
+                dbg!(&upper_adj);
+                break;
+            }
+
+            // We need to figure out if the vertex is above or below the new edge.
+            let vo = self.verts[self.tris[op_tri.tri][op_tri.side as usize]];
+            let mut v1vo = vo.clone();
+            v1vo.sub(&v1);
+
+            if v1vo.cross(&to).is_sign_positive() {
+                // Vertex is above edge
+                upper.push(self.tris[op_tri.tri][op_tri.side as usize]);
+                upper_adj.push(self.opposing_tri(&TriSide{tri: op_tri.tri, side: clockwise(op_tri.side)}));
+                // Next step is the side cut by the edge
+                tri_cursor = TriSide{tri: op_tri.tri, side: anticlockwise(op_tri.side)};
+            } else {
+                // Vertex is below edge
+                lower.push(self.tris[op_tri.tri][op_tri.side as usize]);
+                lower_adj.push(self.opposing_tri(&TriSide{tri: op_tri.tri, side: anticlockwise(op_tri.side)}));
+                // Next step is the side cut by the edge
+                tri_cursor = TriSide{tri: op_tri.tri, side: clockwise(op_tri.side)};
+            }
+        }
+
+        // @SPEED: Maybe this isn't necessary
+        let upper_end = upper.len();
+        upper.push(0xDEADBEEF);
+        upper.append(&mut lower);
+        upper_adj.append(&mut lower_adj);
+        let mut new_tri = vec![TriSide{tri: 0, side: 0}; upper_adj.len()];
+
+        let uv = self.rebuild_tris(&mut dead_tris, &upper, &upper_adj, &mut new_tri, v1i, v2i, false, 0, upper_end-1, None);
+        let lv = self.rebuild_tris(&mut dead_tris, &upper, &upper_adj, &mut new_tri, v1i, v2i, true, upper_end+1, upper.len()-1, None);
+
+        if let Some(x) = uv {
+            if let Some(y) = lv {
+                self.adj[y][2] = Some(TriSide{tri: x, side: 2});
+            }
+
+            self.inverse_tri[v1i] = TriSide{tri: x, side: 0};
+            self.inverse_tri[v2i] = TriSide{tri: x, side: 1};
+        }
+        if let Some(x) = lv {
+            if let Some(y) = uv {
+                self.adj[y][2] = Some(TriSide{tri: x, side: 2});
+            }
+
+            self.inverse_tri[v1i] = TriSide{tri: x, side: 1};
+            self.inverse_tri[v2i] = TriSide{tri: x, side: 0};
+        }
+
+        // @COMPLETENESS: If the pseudo-poly contains repeated vertecies (figure 7) we need to do
+        // some stuff to repair that here
+
+        dbg!(&upper_adj);
+        for (l, r) in upper_adj.iter().zip(new_tri) {
+            if let Some(l) = l {
+                dbg!("SET", l, r);
+                self.adj[l.tri][l.side as usize] = Some(r);
+            }
+        }
+
+        self.edges.push([v1i, v2i]);
+    }
+
+    fn rebuild_tris(&mut self, dead_tris: &mut Vec<usize>, verts: &Vec<usize>, verts_adj: &Vec<Option<TriSide>>, new_tri: &mut [TriSide], v1: usize, v2: usize, swap: bool, start: usize, end: usize, link: Option<TriSide>) -> Option<usize> {
+        // Rebuild a triangle strip after tearing it out. We have to be careful to adjust the
+        // adjecency relationship between triangles correctly
+
+        if end < start {
+            return None;
+        }
+
+        let mut ci = start;
+        let mut c = verts[ci];
+
+        let newt = dead_tris.pop().unwrap();
+
+        let mut v1_link = TriSide{tri: newt, side: 0};
+        let mut v2_link = TriSide{tri: newt, side: 1};
+        if swap {
+            v1_link.side = 1;
+            v2_link.side = 0;
+        }
+
+        let mut v1_t: Option<TriSide> = None;
+        let mut v2_t: Option<TriSide> = None;
+        if end-start+1 > 1 {
+            for i in start..end {
+                let v = verts[i];
+                dbg!(start, end, i, v);
+                if incircle(self.verts[v1].clone(), self.verts[v2].clone(), self.verts[c].clone(), &self.verts[v]) {
+                    ci = i;
+                    c = v;
+                }
+            }
+
+            if ci >= 1 {
+                v2_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, v1, c, swap, start, ci-1, Some(v2_link))
+                .map(|x| TriSide{tri: x, side: 2});
+            }
+            v1_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, c, v2, swap, ci+1, end, Some(v1_link))
+                .map(|x| TriSide{tri: x, side: 2});
+        }
+
+        if ci == end {
+            v1_t = verts_adj[ci+1];
+            new_tri[ci+1] = v1_link;
+        }
+        if ci == start {
+            v2_t = verts_adj[ci];
+            new_tri[ci] = v2_link;
+        }
+
+        if swap {
+            self.tris[newt][0] = v2;
+            self.tris[newt][1] = v1;
+            self.tris[newt][2] = c;
+
+            self.adj[newt][0] = v2_t;
+            self.adj[newt][1] = v1_t;
+            self.adj[newt][2] = link;
+        } else {
+            self.tris[newt][0] = v1;
+            self.tris[newt][1] = v2;
+            self.tris[newt][2] = c;
+
+            self.adj[newt][0] = v1_t;
+            self.adj[newt][1] = v2_t;
+            self.adj[newt][2] = link;
+        }
+        self.inverse_tri[c].tri = newt;
+        self.inverse_tri[c].side = 2;
+
+        return Some(newt);
     }
 }
 
@@ -503,6 +728,208 @@ mod tests {
     }
 
     #[test]
+    fn create_tris_from_array() {
+        let verts = [
+            Vector{x:   0.0, y:   0.0},
+            Vector{x:   0.0, y: 100.0},
+            Vector{x: 100.0, y: 100.0},
+            Vector{x: 100.0, y:   0.0},
+        ];
+        let tris = [
+            [0, 1, 2],
+            [0, 2, 3],
+        ];
+
+        let tri = Tris::explicit(&verts, &tris);
+
+        validate_mesh(&tri);
+
+        assert_eq!(tri.verts.len(), 4);
+        assert_eq!(tri.inverse_tri.len(), 4);
+
+        assert_eq!(tri.tris.len(), 2);
+        assert_eq!(tri.adj.len(), 2);
+
+        // We haven't inserted any edges
+        assert!(tri.edges.is_empty());
+
+        // Check if adjecencies were computed for the right edges. The adjecencies themselves were
+        // checked as part validation
+        assert!(tri.adj[0][0].is_none());
+        assert!(tri.adj[0][1].is_some());
+        assert!(tri.adj[0][2].is_none());
+        assert!(tri.adj[1][0].is_none());
+        assert!(tri.adj[1][1].is_none());
+        assert!(tri.adj[1][2].is_some());
+    }
+
+    #[test]
+    fn add_edge_known_tri() {
+        // Does not generate a valid mesh!
+        let verts = [
+            Vector{x:   0.0, y:   0.0},
+            Vector{x:   0.0, y: 100.0},
+            Vector{x: 100.0, y: 100.0},
+            Vector{x: 100.0, y:   0.0},
+        ];
+        let tris = [
+            [1, 2, 0],
+            [0, 2, 3],
+        ];
+
+        let mut tri = Tris::explicit(&verts, &tris);
+
+        tri.add_edge(1, 3);
+
+        validate_mesh(&tri);
+    }
+
+    #[test]
+    fn add_edge_little_bit_advanced() {
+        // Does not generate a valid mesh!
+        let verts = [
+            Vector{x:   0.0, y:  50.0},
+            Vector{x:  50.0, y: 100.0},
+            Vector{x: 100.0, y: 100.0},
+            Vector{x: 150.0, y:  50.0},
+            Vector{x: 100.0, y:   0.0},
+            Vector{x:  50.0, y:   0.0},
+
+            // For the external tris
+            Vector{x:   0.0, y: 100.0},
+            Vector{x: 125.0, y: 125.0},
+            Vector{x: 150.0, y: 100.0},
+            Vector{x: 150.0, y:   0.0},
+            Vector{x: 125.0, y: -25.0},
+            Vector{x:   0.0, y:   0.0},
+        ];
+        let tris = [
+            [0, 1, 5],
+            [1, 2, 5],
+            [5, 2, 4],
+            [3, 4, 2],
+
+            // External tris
+            [0, 6, 1],
+            [1, 7, 2],
+            [2, 8, 3],
+            [3, 9, 4],
+            [4, 10, 5],
+            [5, 11, 0],
+        ];
+
+        let mut tri = Tris::explicit(&verts, &tris);
+
+        tri.add_edge(0, 3);
+
+        validate_mesh(&tri);
+    }
+
+    #[ignore] // Currently broken due to incomplete implementation
+    #[test]
+    fn add_edge_figure_7() {
+        // Does not generate a valid mesh!
+        let verts = [
+            Vector{x:   0.0, y:  50.0},
+            Vector{x:  50.0, y: 100.0},
+            Vector{x: 100.0, y: 100.0},
+            Vector{x: 150.0, y:  50.0},
+            Vector{x: 100.0, y:   0.0},
+            Vector{x:  50.0, y:   0.0},
+            Vector{x:  50.0, y:  25.0},
+        ];
+        let tris = [
+            [0, 1, 5],
+            [1, 6, 5],
+            [1, 2, 6],
+            [6, 2, 5],
+            [5, 2, 4],
+            [3, 4, 2],
+        ];
+
+        let mut tri = Tris::explicit(&verts, &tris);
+
+        tri.add_edge(0, 3);
+
+        validate_mesh(&tri);
+    }
+
+    #[test]
+    fn rebuild_tri_upper() {
+        // Does not generate a valid mesh!
+        let verts = [
+            Vector{x:   0.0, y:   0.0},
+            Vector{x:   0.0, y: 100.0},
+            Vector{x: 100.0, y: 100.0},
+            Vector{x: 100.0, y:   0.0},
+        ];
+        let tris = [
+            [1, 2, 0],
+            [0, 2, 3],
+        ];
+
+        let mut tri = Tris::explicit(&verts, &tris);
+
+        // Compute the upper node
+        {
+            let mut dead_tris = [0]
+                .to_vec();
+            let mut verts = [
+                0
+            ].to_vec();
+            let mut verts_adj = [
+                None, None
+            ].to_vec();
+            let mut new_tri = vec![TriSide{tri:0, side:0}; verts_adj.len()];
+
+            let uv = tri.rebuild_tris(&mut dead_tris, &mut verts, &mut verts_adj, &mut new_tri, 1, 3, false, 0, 0, None);
+
+            assert!(uv.is_some());
+            assert_eq!(uv.unwrap(), 0);
+            // This HAS to be the node opposite the "new" edge. It's an ugly hardcoded hack
+            assert_eq!(tri.tris[uv.unwrap()][2], 0);
+
+            {
+                let adj = new_tri[0];
+                assert_eq!(tri.tris[adj.tri][adj.side as usize], 3);
+            }
+            {
+                let adj = new_tri[1];
+                assert_eq!(tri.tris[adj.tri][adj.side as usize], 1);
+            }
+        }
+
+        // Then the lower node
+        {
+            let mut dead_tris = [1]
+                .to_vec();
+            let mut verts = [
+                2
+            ].to_vec();
+            let mut verts_adj = [
+                None, None
+            ].to_vec();
+            let mut new_tri = vec![TriSide{tri:0, side:0}; verts_adj.len()];
+
+            let lv = tri.rebuild_tris(&mut dead_tris, &mut verts, &mut verts_adj, &mut new_tri, 1, 3, true, 0, 0, None);
+
+            assert!(lv.is_some());
+            assert_eq!(lv.unwrap(), 1);
+            // This HAS to be the node opposite the "new" edge. It's an ugly hardcoded hack
+            assert_eq!(tri.tris[lv.unwrap()][2], 2);
+
+            {
+                let adj = new_tri[0];
+                assert_eq!(tri.tris[adj.tri][adj.side as usize], 3);
+            }
+            {
+                let adj = new_tri[1];
+                assert_eq!(tri.tris[adj.tri][adj.side as usize], 1);
+            }
+        }
+    }
+
+    #[test]
     fn find_point_inside_start_tri() {
         let bbox = BBox{
             min: Vector{x: -1.0, y: -1.0},
@@ -534,34 +961,24 @@ mod tests {
     }
 
     fn validate_mesh(tris: &Tris) {
+        dbg!(tris);
         assert_eq!(tris.verts.len(), tris.inverse_tri.len());
         assert_eq!( tris.tris.len(),         tris.adj.len());
 
         // All verts in the vert -> tri lookup array point to themselves
         {
             for (i, &x) in tris.inverse_tri.iter().enumerate() {
+                assert!(x.side <= 2);
                 assert_eq!(tris.tris[x.tri][x.side as usize], i);
             }
         };
 
-        // All verts in all triangles opposes some other triangle with a differing opposing vert
-        // and 2 other shared verts
+        // Check the adjecency by just building it again and checking that it's the same. There's
+        // only one valid adjencency array for a given topology, so this should be robust
         {
-            for (trii, tri) in tris.tris.iter().enumerate() {
-                for (side, verti) in tri.iter().enumerate() {
-                    let adj = tris.adj[trii][side as usize];
-                    if let Some(adj) = adj {
-                        // The opposing triangle cannot be the same triangle
-                        assert_ne!(adj.tri, trii);
-                        // The vertex opposing a vertex cannot be the same vertex
-                        assert_ne!(*verti, tris.tris[adj.tri][adj.side as usize]);
-
-                        // The opposing triangle must share two vertecies with our triangle
-                        assert_eq!(tri[clockwise(side as u8) as usize], tris.tris[adj.tri][anticlockwise(adj.side) as usize]);
-                        assert_eq!(tri[anticlockwise(side as u8) as usize], tris.tris[adj.tri][clockwise(adj.side) as usize]);
-                    }
-                }
-            }
+            let adj = build_adjecent(&tris.tris);
+            dbg!(&adj, &tris.adj);
+            assert!(tris.adj == adj);
         };
 
         // Check the winding on the triangles
