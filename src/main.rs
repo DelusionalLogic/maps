@@ -1,8 +1,11 @@
 mod triangulate;
 mod mapbox;
 
+extern crate freetype;
+
 use triangulate::triangulate;
 use std::convert::TryInto;
+use std::ffi::CString;
 
 use glfw;
 use glfw::Context;
@@ -11,6 +14,98 @@ use gl;
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
+
+#[derive(Debug, Clone, Copy)]
+struct Vector2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vector2 {
+    pub fn new(x: f32, y: f32) -> Self {
+        return Vector2 {
+            x,
+            y,
+        }
+    }
+
+    pub fn divf(&mut self, val: f32) {
+        self.x /= val;
+        self.y /= val;
+    }
+
+    pub fn addv2(&mut self, other: &Vector2) {
+        self.x += other.x;
+        self.y += other.y;
+    }
+
+    pub fn subv2(&mut self, other: &Vector2) {
+        self.x -= other.x;
+        self.y -= other.y;
+    }
+}
+
+fn compile_shader(vert: &str, frag: &str) -> u32 {
+    let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
+    unsafe {
+        gl::ShaderSource(vertex_shader, 1, &vert.as_bytes().as_ptr().cast(), &vert.len().try_into().unwrap());
+        gl::CompileShader(vertex_shader);
+
+        let mut success = 0;
+        gl::GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
+        if success == 0 {
+            let mut log_len = 0_i32;
+            // gl::GetShaderiv(vertex_shader, gl::INFO_LOG_LENGTH, &mut log_len);
+            // let mut v: Vec<u8> = Vec::with_capacity(log_len as usize);
+            // gl::GetShaderInfoLog(vertex_shader, log_len, &mut log_len, v.as_mut_ptr().cast());
+            let mut v: Vec<u8> = Vec::with_capacity(1024);
+            gl::GetShaderInfoLog(vertex_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
+            v.set_len(log_len.try_into().unwrap());
+            panic!("Vertex Shader Compile Error: {}", String::from_utf8_lossy(&v));
+        }
+    }
+
+    let fragment_shader = unsafe { gl::CreateShader(gl::FRAGMENT_SHADER) };
+    unsafe {
+        gl::ShaderSource(fragment_shader, 1, &frag.as_bytes().as_ptr().cast(), &frag.len().try_into().unwrap());
+        gl::CompileShader(fragment_shader);
+
+        let mut success = 0;
+        gl::GetShaderiv(fragment_shader, gl::COMPILE_STATUS, &mut success);
+        if success == 0 {
+            let mut v: Vec<u8> = Vec::with_capacity(1024);
+            let mut log_len = 0_i32;
+            gl::GetShaderInfoLog(fragment_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
+            v.set_len(log_len.try_into().unwrap());
+            panic!("Fragment Shader Compile Error: {}", String::from_utf8_lossy(&v));
+        }
+    }
+
+    let program;
+    unsafe {
+        program = gl::CreateProgram();
+        gl::AttachShader(program, vertex_shader);
+        gl::AttachShader(program, fragment_shader);
+        gl::LinkProgram(program);
+
+        let mut success = 0;
+        gl::GetProgramiv(program, gl::LINK_STATUS, &mut success);
+        if success == 0 {
+            let mut v: Vec<u8> = Vec::with_capacity(1024);
+            let mut log_len = 0_i32;
+            gl::GetProgramInfoLog(program, 1024, &mut log_len, v.as_mut_ptr().cast());
+            v.set_len(log_len.try_into().unwrap());
+            panic!("Program Link Error: {}", String::from_utf8_lossy(&v));
+        }
+
+        gl::DetachShader(program, vertex_shader);
+        gl::DetachShader(program, fragment_shader);
+        gl::DeleteShader(vertex_shader);
+        gl::DeleteShader(fragment_shader);
+    }
+
+    return program;
+}
 
 fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
     return [
@@ -40,9 +135,9 @@ fn mat4_multply(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 
 fn mat4_scale(factor: f32) -> [f32; 16] {
     return [
-        1.0+factor,        0.0,        0.0, 0.0,
-               0.0, 1.0+factor,        0.0, 0.0,
-               0.0,        0.0, 1.0+factor, 0.0,
+            factor,        0.0,        0.0, 0.0,
+               0.0,     factor,        0.0, 0.0,
+               0.0,        0.0,     factor, 0.0,
                0.0,        0.0,        0.0, 1.0,
     ];
 }
@@ -63,7 +158,202 @@ const IDENTITY: [f32; 16] = [
            0.0,    0.0,    0.0, 1.0,
 ];
 
+pub struct LineProg {
+    program: u32,
+    transform: i32,
+    width: i32,
+    fill_color: i32,
+}
+
+struct Character {
+    size: Vector2,
+    bearing: Vector2,
+    advance: f32,
+    texture: u32,
+}
+
+struct FontMap {
+    chars: Vec<Character>,
+
+    shader: u32,
+    uni_transform: i32,
+    uni_texture: i32,
+
+    vao: u32,
+    vbo: u32,
+}
+
+impl Drop for FontMap {
+    fn drop(&mut self) {
+        let mut textures = Vec::with_capacity(self.chars.len());
+        for char in &self.chars {
+            textures.push(char.texture);
+        }
+        unsafe{ gl::DeleteTextures(textures.len().try_into().unwrap(), textures.as_ptr()) };
+
+        unsafe{ gl::DeleteProgram(self.shader) };
+
+        unsafe{ gl::DeleteVertexArrays(1, &self.vao) };
+        unsafe{ gl::DeleteBuffers(1, &self.vbo) };
+    }
+}
+
+fn load_font() -> FontMap {
+    let freetype = freetype::Library::init().unwrap();
+    let face = freetype.new_face("/System/Library/Fonts/Supplemental/Baskerville.ttc", 0).unwrap();
+
+    let mut chars = Vec::with_capacity(128);
+
+    let mut textures = [0; 128];
+    unsafe{ gl::GenTextures(textures.len() as i32, textures.as_mut_ptr()) };
+    for i in 0..128 {
+        unsafe{
+            gl::BindTexture(gl::TEXTURE_2D, textures[i]);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+        }
+    }
+
+    unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
+    face.set_pixel_sizes(0, 12).unwrap();
+    for i in 0..128 {
+        face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
+        let bitmap = face.glyph().bitmap();
+        let size = Vector2::new(bitmap.width() as f32, bitmap.rows() as f32);
+        let bearing = Vector2::new(
+            face.glyph().bitmap_left() as f32,
+            face.glyph().bitmap_top() as f32,
+        );
+        let advance = (face.glyph().advance().x >> 6) as f32;
+
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, textures[i]);
+            gl::TexStorage2D(
+                gl::TEXTURE_2D, 0,
+                gl::RED,
+                bitmap.width(), bitmap.rows()
+            );
+            gl::TexSubImage2D(
+                gl::TEXTURE_2D, 0,
+                0, 0,
+                bitmap.width(), bitmap.rows(),
+                gl::RED, gl::UNSIGNED_BYTE,
+                bitmap.buffer().as_ptr() as _,
+            );
+        };
+
+        chars.push(Character {
+            size,
+            bearing,
+            advance,
+            texture: textures[i],
+        });
+    }
+
+    const TEXT_VERT: &str = "
+        #version 330 core
+        layout(location = 0) in vec2 position;
+
+        uniform mat4 transform;
+
+        out vec2 uv;
+
+        void main() {
+            uv = position;
+            gl_Position = transform * vec4(position, 0.0, 1.0);
+        }
+    ";
+
+    const TEXT_FRAG: &str = "
+        #version 330 core
+        in vec2 uv;
+
+        out vec4 color;
+
+        void main() {
+            color = vec4(1.0, 0.0, 0.0, 1.0);
+        }
+    ";
+
+    let program = compile_shader(TEXT_VERT, TEXT_FRAG);
+    let uni_texture;
+    let uni_transform;
+    {
+        let name = CString::new("texture").unwrap();
+        uni_texture = unsafe{ gl::GetUniformLocation(program, name.as_ptr()) };
+        let name = CString::new("transform").unwrap();
+        uni_transform = unsafe{ gl::GetUniformLocation(program, name.as_ptr()) };
+    }
+
+    let verts = [
+        0.0, 0.0,
+        0.0, 1.0,
+        1.0, 0.0,
+        1.0, 1.0,
+    ];
+
+    let mut vao = 0;
+    unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+    let mut vbo = 0;
+    unsafe { gl::GenBuffers(1, &mut vbo) };
+    unsafe {
+        gl::BindVertexArray(vao);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<f32>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 2 * std::mem::size_of::<f32>() as i32, 0 as *const _);
+        gl::EnableVertexAttribArray(0);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+
+    return FontMap{
+        chars,
+        shader: program,
+        uni_texture,
+        uni_transform,
+
+        vao,
+        vbo,
+    };
+}
+
+fn draw_text(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
+    unsafe {
+        gl::Enable(gl::BLEND);
+
+        gl::UseProgram(font.shader);
+        gl::Uniform1i(font.uni_texture, 0);
+
+        gl::ActiveTexture(gl::TEXTURE0);
+    }
+
+    let mut pen = *pos;
+    for c in text {
+        let char = &font.chars[*c as usize];
+
+        let mut pos = pen;
+        pos.addv2(&char.bearing);
+        pos.y -= char.size.y;
+
+        let mvp = mat4_multply(&mat4_multply(&mat4_translate(pos.x, pos.y), &mat4_scale(200.0)), projection);
+
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, char.texture);
+            gl::UniformMatrix4fv(font.uni_transform, 1, gl::TRUE, mvp.as_ptr());
+            gl::BindVertexArray(font.vao);
+            gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+}
+
 fn main() {
+    // Load font
     let mut file = std::fs::File::open("aalborg.mvt").unwrap();
     let (start, verts) = mapbox::read_one_linestring(&mut mapbox::pbuf::Message::new(&mut file)).unwrap();
     // dbg!(x);
@@ -72,18 +362,20 @@ fn main() {
     glfw.window_hint(glfw::WindowHint::ContextVersion(3, 3));
     glfw.window_hint(glfw::WindowHint::OpenGlProfile(glfw::OpenGlProfileHint::Core));
     glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
-    glfw.window_hint(glfw::WindowHint::Resizable(false));
+    glfw.window_hint(glfw::WindowHint::Resizable(true));
 
     let mut display;
     let (mut window, events) = glfw.create_window(WIDTH, HEIGHT, TITLE, glfw::WindowMode::Windowed).unwrap();
     {
+        let (mouse_x, mouse_y) = window.get_cursor_pos();
+        let (cx, cy) = window.get_content_scale();
         let (screen_width, screen_height) = window.get_framebuffer_size();
         display = DisplayState{
             width: screen_width,
             height: screen_height,
             size_change: true,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
+            mouse_x: mouse_x * cx as f64,
+            mouse_y: mouse_y * cy as f64,
         }
     }
 
@@ -99,21 +391,24 @@ fn main() {
         gl::Viewport(0, 0, display.width, display.height);
         clear_color(Color(0.4, 0.4, 0.4, 1.0));
     }
+    println!("OpenGL version: {}", gl_get_string(gl::VERSION));
+    println!("GLSL version: {}", gl_get_string(gl::SHADING_LANGUAGE_VERSION));
     // -------------------------------------------
+
+    let font = load_font();
 
     const VERT_SHADER: &str = "
         #version 330 core
-        #extension GL_ARB_explicit_uniform_location : enable
         layout(location = 0) in vec2 position;
         layout(location = 1) in vec2 normal;
         layout(location = 2) in float sign;
         // layout(location = 1) in vec2 a_bary;
-        varying vec3 v_bary;
-        varying float v_dist;
+        out vec3 v_bary;
+        out float v_dist;
 
 
-        layout(location = 0) uniform mat4 transform;
-        layout(location = 1) uniform float tesselation_width;
+        uniform mat4 transform;
+        uniform float tesselation_width;
 
         const vec3 barys[3] = vec3[](
             vec3(0, 0, 1),
@@ -132,20 +427,21 @@ fn main() {
 
     const FRAG_SHADER: &str = "
         #version 330 core
-        #extension GL_ARB_explicit_uniform_location : enable
         #extension GL_OES_standard_derivatives : enable
         out vec4 color;
-        varying vec3 v_bary;
-        varying float v_dist;
 
-        layout(location = 1) uniform float tesselation_width;
+        in vec3 v_bary;
+        in float v_dist;
+
+        uniform float tesselation_width;
         const vec4 border_color = vec4(.5, .5, .5, 1);
 
+        uniform vec4 fill_color;
+
+        const float feather = 1.5;
         const float line_width = 0.7;
         const float line_smooth = .5;
         const vec4 edge_color = vec4(0, 0, 0, 1);
-
-        layout(location = 2) uniform vec4 fill_color;
 
         float linearstep(float edge0, float edge1, float x) {
             return  clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -160,19 +456,21 @@ fn main() {
         }
 
         void main() {
-            float feather = .8/tesselation_width;
+            float dist = abs(v_dist);
+
             float border = 2/tesselation_width;
 
             color = fill_color;
 
-            float dist = abs(v_dist);
 
             { // Border
                 // float ffactor = linearstep(1-border-feather, 1-border, dist);
                 // color = mix(color, border_color, ffactor);
             }
 
-            float ffactor = 1-smoothstep(1-feather, 1, dist);
+            float invdist = 1-dist;
+            float grad = fwidth(invdist);
+            float ffactor = clamp(invdist/(feather*grad), 0, 1);
             color.a *= ffactor;
 
             // color = mix(edge_color, color, edge_factor());
@@ -180,61 +478,20 @@ fn main() {
         }
     ";
 
-    let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
-    unsafe {
-        gl::ShaderSource(vertex_shader, 1, &VERT_SHADER.as_bytes().as_ptr().cast(), &VERT_SHADER.len().try_into().unwrap());
-        gl::CompileShader(vertex_shader);
-
-        let mut success = 0;
-        gl::GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
-        if success == 0 {
-            let mut log_len = 0_i32;
-            // gl::GetShaderiv(vertex_shader, gl::INFO_LOG_LENGTH, &mut log_len);
-            // let mut v: Vec<u8> = Vec::with_capacity(log_len as usize);
-            // gl::GetShaderInfoLog(vertex_shader, log_len, &mut log_len, v.as_mut_ptr().cast());
-            let mut v: Vec<u8> = Vec::with_capacity(1024);
-            gl::GetShaderInfoLog(vertex_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
-            v.set_len(log_len.try_into().unwrap());
-            panic!("Vertex Shader Compile Error: {}", String::from_utf8_lossy(&v));
+    let shader_program;
+    {
+        let program = compile_shader(VERT_SHADER, FRAG_SHADER);
+        let transform_str = CString::new("transform").unwrap();
+        let width_str = CString::new("tesselation_width").unwrap();
+        let fill_color_str = CString::new("fill_color").unwrap();
+        unsafe {
+            shader_program = LineProg{
+                program,
+                transform: gl::GetUniformLocation(program, transform_str.as_ptr()),
+                width: gl::GetUniformLocation(program, width_str.as_ptr()),
+                fill_color: gl::GetUniformLocation(program, fill_color_str.as_ptr()),
+            }
         }
-    }
-
-    let fragment_shader = unsafe { gl::CreateShader(gl::FRAGMENT_SHADER) };
-    unsafe {
-        gl::ShaderSource(fragment_shader, 1, &FRAG_SHADER.as_bytes().as_ptr().cast(), &FRAG_SHADER.len().try_into().unwrap());
-        gl::CompileShader(fragment_shader);
-
-        let mut success = 0;
-        gl::GetShaderiv(fragment_shader, gl::COMPILE_STATUS, &mut success);
-        if success == 0 {
-            let mut v: Vec<u8> = Vec::with_capacity(1024);
-            let mut log_len = 0_i32;
-            gl::GetShaderInfoLog(fragment_shader, 1024, &mut log_len, v.as_mut_ptr().cast());
-            v.set_len(log_len.try_into().unwrap());
-            panic!("Fragment Shader Compile Error: {}", String::from_utf8_lossy(&v));
-        }
-    }
-
-    let shader_program = unsafe { gl::CreateProgram() };
-    unsafe {
-        gl::AttachShader(shader_program, vertex_shader);
-        gl::AttachShader(shader_program, fragment_shader);
-        gl::LinkProgram(shader_program);
-
-        let mut success = 0;
-        gl::GetProgramiv(shader_program, gl::LINK_STATUS, &mut success);
-        if success == 0 {
-            let mut v: Vec<u8> = Vec::with_capacity(1024);
-            let mut log_len = 0_i32;
-            gl::GetProgramInfoLog(shader_program, 1024, &mut log_len, v.as_mut_ptr().cast());
-            v.set_len(log_len.try_into().unwrap());
-            panic!("Program Link Error: {}", String::from_utf8_lossy(&v));
-        }
-
-        gl::DetachShader(shader_program, vertex_shader);
-        gl::DetachShader(shader_program, fragment_shader);
-        gl::DeleteShader(vertex_shader);
-        gl::DeleteShader(fragment_shader);
     }
 
     let tris = triangulate(
@@ -317,23 +574,60 @@ fn main() {
     }
 
     // -------------------------------------------
-    println!("OpenGL version: {}", gl_get_string(gl::VERSION));
-    println!("GLSL version: {}", gl_get_string(gl::SHADING_LANGUAGE_VERSION));
 
     let mut projection = ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
-    let mut camera_matrix = IDENTITY;
-    let mut hold: Option<(f64, f64)> = None;
+    let mut hold: Option<Vector2> = None;
+    let mut scale = 1.0;
+    let mut viewport_pos = Vector2::new(0.0, 0.0);
+    let mut mouse_world = Vector2::new(0.0, 0.0);
     while !window.should_close() {
         glfw.poll_events();
 
         display.size_change = false;
 
+        let mut zoom = 0.0;
         for (_, event) in glfw::flush_messages(&events) {
-            glfw_handle_event(&mut window, event, &mut display, &mut camera_matrix);
+            glfw_handle_event(&mut window, event, &mut display, &mut zoom);
         }
+
+        if zoom != 0.0 {
+            let old_scale = scale;
+            scale *= 1.0 + zoom;
+
+            // Limit the scale to some sensible? values
+            scale = scale.clamp(0.1, 100.0);
+            zoom = scale/old_scale - 1.0;
+
+            viewport_pos.x += display.mouse_x as f32 / scale * zoom;
+            viewport_pos.y += display.mouse_y as f32 / scale * zoom;
+        }
+
+        {
+            // Calculate the mouse position in the world
+            mouse_world.x = display.mouse_x as f32;
+            mouse_world.y = display.mouse_y as f32;
+            mouse_world.divf(scale);
+            mouse_world.addv2(&viewport_pos);
+        }
+
         if display.size_change {
             projection = ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
         }
+
+        if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
+            if let Some(hold) = hold {
+                let mut diff = hold;
+                diff.subv2(&mouse_world);
+                viewport_pos.addv2(&diff);
+                mouse_world = hold;
+            } else {
+                hold = Some(mouse_world);
+            }
+        } else {
+            hold = None;
+        }
+
+        let camera_matrix = mat4_multply(&mat4_translate(-viewport_pos.x, -viewport_pos.y), &mat4_scale(scale));
 
         clear_color(Color(0.3, 0.4, 0.6, 1.0));
 
@@ -341,34 +635,25 @@ fn main() {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
-        // zoom = (display.mouse_x / 700.0) as f32;
-
-        if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
-            if let Some((lastx, lasty)) = hold {
-                camera_matrix = mat4_multply(&camera_matrix, &mat4_translate((display.mouse_x-lastx) as _, (display.mouse_y-lasty) as _));
-            }
-            hold = Some((display.mouse_x, display.mouse_y));
-        } else {
-            hold = None;
-        }
-
         unsafe {
-            gl::UseProgram(shader_program);
+            gl::UseProgram(shader_program.program);
             let mvp = mat4_multply(&camera_matrix, &projection);
 
-            gl::UniformMatrix4fv(0, 1, gl::TRUE, mvp.as_ptr());
+            gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, mvp.as_ptr());
             gl::BindVertexArray(vao);
 
-            gl::Uniform1f(1, 3.0);
-            gl::Uniform4f(2, 0.8, 0.8, 0.8, 1.0);
+            gl::Uniform1f(shader_program.width, 3.0);
+            gl::Uniform4f(shader_program.fill_color, 0.8, 0.8, 0.8, 1.0);
             gl::DrawArrays(gl::TRIANGLES, 0, verts.len() as _);
 
-            gl::Uniform1f(1, 2.0);
-            gl::Uniform4f(2, 1.0, 1.0, 1.0, 1.0);
+            gl::Uniform1f(shader_program.width, 2.0);
+            gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
             gl::DrawArrays(gl::TRIANGLES, 0, verts.len() as _);
 
             gl::BindVertexArray(0);
         }
+
+        draw_text(&projection, &font, "Hello world!".as_bytes(), &mouse_world);
 
         window.swap_buffers();
     }
@@ -394,7 +679,7 @@ pub fn gl_get_string<'a>(name: gl::types::GLenum) -> &'a str {
     v.to_str().unwrap()
 }
 
-fn glfw_handle_event(window: &mut glfw::Window, event: glfw::WindowEvent, state: &mut DisplayState, camera: &mut [f32; 16]) {
+fn glfw_handle_event(window: &mut glfw::Window, event: glfw::WindowEvent, state: &mut DisplayState, zoom: &mut f32) {
     use glfw::WindowEvent as Event;
     use glfw::Key;
     use glfw::Action;
@@ -413,14 +698,14 @@ fn glfw_handle_event(window: &mut glfw::Window, event: glfw::WindowEvent, state:
             window.set_should_close(true);
         },
         Event::CursorPos(x, y) => {
-            state.mouse_x = x;
-            state.mouse_y = y;
+            let (sx, sy) = window.get_content_scale();
+            state.mouse_x = x * sx as f64;
+            state.mouse_y = y * sy as f64;
         },
         Event::Scroll(_, y) => {
-            let mut transform = mat4_translate(state.mouse_x as f32, state.mouse_y as f32);
-            transform = mat4_multply(&mat4_scale(y as f32 * 0.1), &transform, );
-            transform = mat4_multply(&mat4_translate(-state.mouse_x as _, -state.mouse_y as _), &transform, );
-            *camera = mat4_multply( camera, &transform, );
+            *zoom += y as f32 * 0.1;
+            // view_pos.y -= state.mouse_y as f32 * zoom_diff;
+            // dbg!("X {} Y {} RECI {}", state.mouse_x, state.mouse_y, reci, view_pos.x, view_pos.y, *zoom);
         },
         _ => {},
     }

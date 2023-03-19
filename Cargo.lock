@@ -181,6 +181,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "freetype-rs"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d59c337e64822dd56a3a83ed75a662a470736bdb3a9fabfb588dff276b94a4e0"
+dependencies = [
+ "bitflags",
+ "freetype-sys",
+ "libc",
+]
+
+[[package]]
+name = "freetype-sys"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "643148ca6cbad6bec384b52fbe1968547d578c4efe83109e035c43a71734ff88"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -362,6 +383,7 @@ dependencies = [
 name = "maps"
 version = "0.1.0"
 dependencies = [
+ "freetype-rs",
  "gl",
  "glfw",
  "image",
