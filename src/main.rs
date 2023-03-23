@@ -29,6 +29,11 @@ impl Vector2 {
         }
     }
 
+    pub fn addf(&mut self, val: f32) {
+        self.x += val;
+        self.y += val;
+    }
+
     pub fn divf(&mut self, val: f32) {
         self.x /= val;
         self.y /= val;
@@ -42,6 +47,32 @@ impl Vector2 {
     pub fn subv2(&mut self, other: &Vector2) {
         self.x -= other.x;
         self.y -= other.y;
+    }
+
+    pub fn normal(&mut self) {
+        let x = self.x;
+        self.x = self.y;
+        self.y = -x;
+    }
+
+    pub fn len(&self) -> f32 {
+        return (self.x.powi(2) + self.y.powi(2)).sqrt();
+    }
+
+    pub fn unit(&mut self) {
+        let len = self.len();
+        self.x /= len;
+        self.y /= len;
+    }
+
+    pub fn apply_transform(&mut self, mat: &[f32; 9]) {
+        self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
+        self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
+    }
+
+    pub fn mulv2(&mut self, other: &Vector2) {
+        self.x *= other.x;
+        self.y *= other.y;
     }
 }
 
@@ -149,6 +180,14 @@ fn mat4_translate(x: f32, y: f32) -> [f32; 16] {
            0.0,    0.0,    1.0, 0.0,
            0.0,    0.0,    0.0, 1.0,
     ];
+}
+
+fn mat4_to_mat3(mat: &[f32; 16]) -> [f32; 9] {
+    return [
+        mat[0], mat[1], mat[3],
+        mat[4], mat[5], mat[7],
+        mat[12], mat[13], mat[15],
+    ]
 }
 
 const IDENTITY: [f32; 16] = [
@@ -352,10 +391,180 @@ fn draw_text(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) 
     }
 }
 
+struct Tile {
+    x: u64,
+    y: u64,
+    z: u8,
+    extent: u16,
+    vao: u32,
+    vbo: u32,
+    vertex_len: usize,
+}
+
+impl Drop for Tile {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteVertexArrays(1, &self.vao);
+            gl::DeleteBuffers(1, &self.vbo);
+        }
+    }
+}
+
+fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<Tile, String> {
+    let (start, verts) = mapbox::read_one_linestring(&mut mapbox::pbuf::Message::new(&mut file)).unwrap();
+
+    let mut vao = 0;
+    unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+    let mut vbo = 0;
+    unsafe { gl::GenBuffers(1, &mut vbo) };
+
+    unsafe {
+        gl::BindVertexArray(vao);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<mapbox::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, 0 as *const _);
+        gl::EnableVertexAttribArray(0);
+        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(1);
+        gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(2);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+
+    // @INCOMPLETE @CLEANUP: The extent here should be read from the file
+    return Ok(Tile{
+        x,
+        y,
+        z,
+        extent: 4096,
+        vao,
+        vbo,
+        vertex_len: verts.len(),
+    });
+}
+
+fn add_point(verts: &mut Vec<mapbox::LineVert>, lv: Vector2, v1: Vector2, connect_previous: bool) {
+    let cx = lv.x;
+    let cy = lv.y;
+
+    let mut ltov = v1.clone();
+    ltov.subv2(&lv);
+
+    let mut normal = ltov.clone();
+    normal.normal();
+    normal.unit();
+
+    let bend_norm_x;
+    let bend_norm_y;
+
+    if connect_previous {
+        let len = verts.len();
+
+        let last_normx = verts[len-2].norm_x;
+        let last_normy = verts[len-2].norm_y;
+
+        let mut join_x = last_normx + normal.x;
+        let mut join_y = last_normy + normal.y;
+        let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
+        join_x /= join_len;
+        join_y /= join_len;
+
+        let cos_angle = normal.x * join_x + normal.y * join_y;
+        let l = 1.0 / cos_angle;
+
+        bend_norm_x = join_x * l;
+        bend_norm_y = join_y * l;
+
+        verts[len-2].norm_x = bend_norm_x;
+        verts[len-2].norm_y = bend_norm_y;
+        verts[len-3].norm_x = -bend_norm_x;
+        verts[len-3].norm_y = -bend_norm_y;
+        verts[len-4].norm_x = bend_norm_x;
+        verts[len-4].norm_y = bend_norm_y;
+    } else {
+        bend_norm_x = normal.x;
+        bend_norm_y = normal.y;
+    }
+
+    // Now construct the tris
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+}
+
+fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
+    let mut verts: Vec<mapbox::LineVert> = vec![];
+
+    let mut lv = Vector2::new(0.0, 0.0);
+
+    {
+        let nv = Vector2::new(0.0, 4096.0);
+        add_point(&mut verts, lv, nv, false);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(4096.0, 4096.0);
+        add_point(&mut verts, lv, nv, true);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(4096.0, 0.0);
+        add_point(&mut verts, lv, nv, true);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(0.0, 0.0);
+        add_point(&mut verts, lv, nv, true);
+    }
+
+    let mut vao = 0;
+    unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+    let mut vbo = 0;
+    unsafe { gl::GenBuffers(1, &mut vbo) };
+
+    unsafe {
+        gl::BindVertexArray(vao);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<mapbox::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, 0 as *const _);
+        gl::EnableVertexAttribArray(0);
+        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(1);
+        gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(2);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+
+    return Tile{
+        x,
+        y,
+        z,
+        extent: 4096,
+        vao,
+        vbo,
+        vertex_len: verts.len(),
+    };
+}
+
 fn main() {
     // Load font
-    let mut file = std::fs::File::open("aalborg.mvt").unwrap();
-    let (start, verts) = mapbox::read_one_linestring(&mut mapbox::pbuf::Message::new(&mut file)).unwrap();
     // dbg!(x);
 
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
@@ -530,12 +739,6 @@ fn main() {
         }
     }
 
-    let mut vao = 0;
-    unsafe { gl::GenVertexArrays(1, &mut vao) };
-
-    let mut vbo = 0;
-    unsafe { gl::GenBuffers(1, &mut vbo) };
-
     /*
     unsafe {
         gl::BindVertexArray(vao);
@@ -552,26 +755,11 @@ fn main() {
         gl::BindVertexArray(0);
     }
     */
-
-    unsafe {
-        gl::BindVertexArray(vao);
-
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<mapbox::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
-
-        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, 0 as *const _);
-        gl::EnableVertexAttribArray(0);
-        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-        gl::EnableVertexAttribArray(1);
-        gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-        gl::EnableVertexAttribArray(2);
-
-        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-        gl::BindVertexArray(0);
-
-        gl::Enable(gl::BLEND);
-        gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
-    }
+    let file = std::fs::File::open("aalborg.mvt").unwrap();
+    let tile = compile_tile(0, 0, 0, file).unwrap();
+    let file = std::fs::File::open("aalborg.mvt").unwrap();
+    let ctile = compile_tile(1, 1, 1, file).unwrap();
+    let ptile = placeholder_tile(1, 0, 1);
 
     // -------------------------------------------
 
@@ -580,6 +768,7 @@ fn main() {
     let mut scale = 1.0;
     let mut viewport_pos = Vector2::new(0.0, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
+    const MAP_SIZE : u64 = 512;
     while !window.should_close() {
         glfw.poll_events();
 
@@ -595,7 +784,7 @@ fn main() {
             scale *= 1.0 + zoom;
 
             // Limit the scale to some sensible? values
-            scale = scale.clamp(0.1, 100.0);
+            scale = scale.clamp(1.0, 1000.0);
             zoom = scale/old_scale - 1.0;
 
             viewport_pos.x += display.mouse_x as f32 / scale * zoom;
@@ -627,6 +816,12 @@ fn main() {
             hold = None;
         }
 
+        let visible_tiles = vec![
+            &tile,
+            &ctile,
+            &ptile,
+        ];
+
         let camera_matrix = mat4_multply(&mat4_translate(-viewport_pos.x, -viewport_pos.y), &mat4_scale(scale));
 
         clear_color(Color(0.3, 0.4, 0.6, 1.0));
@@ -635,22 +830,73 @@ fn main() {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
+        let scale_level = 1;
+
         unsafe {
             gl::UseProgram(shader_program.program);
-            let mvp = mat4_multply(&camera_matrix, &projection);
+        }
 
-            gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, mvp.as_ptr());
-            gl::BindVertexArray(vao);
+        let vp = mat4_multply(&camera_matrix, &projection);
+        for tile in visible_tiles {
+            let grid_step = MAP_SIZE / (tile.z as u64+1);
 
-            gl::Uniform1f(shader_program.width, 3.0);
-            gl::Uniform4f(shader_program.fill_color, 0.8, 0.8, 0.8, 1.0);
-            gl::DrawArrays(gl::TRIANGLES, 0, verts.len() as _);
+            // Transform the tilelocal coordinates to global coordinates
+            let tile_transform;
+            {
+                let xcoord = tile.x * scale_level * grid_step;
+                let ycoord = tile.y * scale_level * grid_step;
+                let tile_matrix = mat4_multply(&mat4_scale(grid_step as f32/ tile.extent as f32), &mat4_translate(xcoord as f32, ycoord as f32));
+                tile_transform = mat4_multply(&tile_matrix, &vp);
+            }
 
-            gl::Uniform1f(shader_program.width, 2.0);
-            gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
-            gl::DrawArrays(gl::TRIANGLES, 0, verts.len() as _);
 
-            gl::BindVertexArray(0);
+            // Calculate the screen position of the time and scissor that
+            {
+                let mut v1 = Vector2::new(0.0, tile.extent as f32);
+                let mut v2 = Vector2::new(tile.extent as f32, 0.0);
+
+                // The clipspace transform
+                let mvp2d = mat4_to_mat3(&tile_transform);
+                v1.apply_transform(&mvp2d);
+                v2.apply_transform(&mvp2d);
+
+                // The viewport transform
+                v1.addf(1.0);
+                v1.divf(2.0);
+                v2.addf(1.0);
+                v2.divf(2.0);
+
+                let display_size = Vector2::new(display.width as f32, display.height as f32);
+                v1.mulv2(&display_size);
+                v2.mulv2(&display_size);
+
+                v2.subv2(&v1);
+
+                unsafe {
+                    gl::Enable(gl::SCISSOR_TEST);
+                    gl::Scissor(v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32);
+                }
+            }
+
+            unsafe {
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+            }
+
+            unsafe {
+                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform.as_ptr());
+                gl::BindVertexArray(tile.vao);
+
+                gl::Uniform1f(shader_program.width, 3.0);
+                gl::Uniform4f(shader_program.fill_color, 0.8, 0.8, 0.8, 1.0);
+                gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
+
+                gl::Uniform1f(shader_program.width, 2.0);
+                gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
+                gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
+
+                gl::BindVertexArray(0);
+                gl::Disable(gl::SCISSOR_TEST);
+            }
         }
 
         draw_text(&projection, &font, "Hello world!".as_bytes(), &mouse_world);

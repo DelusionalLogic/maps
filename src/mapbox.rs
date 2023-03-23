@@ -512,11 +512,11 @@ impl Vector {
 #[derive(Clone,Copy,Debug)]
 #[repr(packed)]
 pub struct LineVert {
-    x: f32,
-    y: f32,
-    norm_x: f32,
-    norm_y: f32,
-    sign: i8,
+    pub x: f32,
+    pub y: f32,
+    pub norm_x: f32,
+    pub norm_y: f32,
+    pub sign: i8,
 }
 
 #[derive(Debug)]
