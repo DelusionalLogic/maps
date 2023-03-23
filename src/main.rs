@@ -138,6 +138,8 @@ fn compile_shader(vert: &str, frag: &str) -> u32 {
     return program;
 }
 
+type Mat4 = [f32; 16];
+
 fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
     return [
         2.0/(right-left),              0.0,            0.0, -(right+left)/(right-left),
@@ -164,13 +166,17 @@ fn mat4_multply(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     return out;
 }
 
-fn mat4_scale(factor: f32) -> [f32; 16] {
+fn mat4_scale_2d(x_factor: f32, y_factor: f32) -> [f32; 16] {
     return [
-            factor,        0.0,        0.0, 0.0,
-               0.0,     factor,        0.0, 0.0,
-               0.0,        0.0,     factor, 0.0,
+          x_factor,        0.0,        0.0, 0.0,
+               0.0,   y_factor,        0.0, 0.0,
+               0.0,        0.0,        1.0, 0.0,
                0.0,        0.0,        0.0, 1.0,
     ];
+}
+
+fn mat4_scale(factor: f32) -> [f32; 16] {
+    return mat4_scale_2d(factor, factor);
 }
 
 fn mat4_translate(x: f32, y: f32) -> [f32; 16] {
@@ -239,7 +245,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/System/Library/Fonts/Supplemental/Baskerville.ttc", 0).unwrap();
+    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -256,22 +262,22 @@ fn load_font() -> FontMap {
     }
 
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
-    face.set_pixel_sizes(0, 12).unwrap();
+    face.set_pixel_sizes(0, 24).unwrap();
     for i in 0..128 {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
         let bitmap = face.glyph().bitmap();
         let size = Vector2::new(bitmap.width() as f32, bitmap.rows() as f32);
         let bearing = Vector2::new(
             face.glyph().bitmap_left() as f32,
-            face.glyph().bitmap_top() as f32,
+            -face.glyph().bitmap_top() as f32,
         );
         let advance = (face.glyph().advance().x >> 6) as f32;
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, textures[i]);
             gl::TexStorage2D(
-                gl::TEXTURE_2D, 0,
-                gl::RED,
+                gl::TEXTURE_2D, 1,
+                gl::R8,
                 bitmap.width(), bitmap.rows()
             );
             gl::TexSubImage2D(
@@ -301,6 +307,8 @@ fn load_font() -> FontMap {
 
         void main() {
             uv = position;
+            uv.y = uv.y;
+
             gl_Position = transform * vec4(position, 0.0, 1.0);
         }
     ";
@@ -308,11 +316,13 @@ fn load_font() -> FontMap {
     const TEXT_FRAG: &str = "
         #version 330 core
         in vec2 uv;
+        uniform sampler2D texture;
 
         out vec4 color;
 
         void main() {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
+            vec4 tex = texture2D(texture, uv);
+            color = vec4(1.0, 1.0, 1.0, 1.0) * tex.r;
         }
     ";
 
@@ -327,7 +337,7 @@ fn load_font() -> FontMap {
     }
 
     let verts = [
-        0.0, 0.0,
+        0.0 as f32, 0.0,
         0.0, 1.0,
         1.0, 0.0,
         1.0, 1.0,
@@ -362,7 +372,7 @@ fn load_font() -> FontMap {
     };
 }
 
-fn draw_text(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
+fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
     unsafe {
         gl::Enable(gl::BLEND);
 
@@ -378,9 +388,8 @@ fn draw_text(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) 
 
         let mut pos = pen;
         pos.addv2(&char.bearing);
-        pos.y -= char.size.y;
 
-        let mvp = mat4_multply(&mat4_multply(&mat4_translate(pos.x, pos.y), &mat4_scale(200.0)), projection);
+        let mvp = mat4_multply(&mat4_multply(&mat4_scale_2d(char.size.x, char.size.y), &mat4_translate(pos.x, pos.y)), projection);
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, char.texture);
@@ -388,6 +397,8 @@ fn draw_text(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) 
             gl::BindVertexArray(font.vao);
             gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
         }
+
+        pen.x += char.advance;
     }
 }
 
@@ -833,6 +844,7 @@ fn main() {
         let scale_level = 1;
 
         unsafe {
+            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::MAX);
             gl::UseProgram(shader_program.program);
         }
 
@@ -899,7 +911,7 @@ fn main() {
             }
         }
 
-        draw_text(&projection, &font, "Hello world!".as_bytes(), &mouse_world);
+        draw_ascii(&projection, &font, format!("Zoom level {}", f32::log2(scale).floor()).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
     }
