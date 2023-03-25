@@ -245,7 +245,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
+    let face = freetype.new_face("/System/Library/Fonts/Optima.ttc", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -316,12 +316,12 @@ fn load_font() -> FontMap {
     const TEXT_FRAG: &str = "
         #version 330 core
         in vec2 uv;
-        uniform sampler2D texture;
+        uniform sampler2D tex;
 
         out vec4 color;
 
         void main() {
-            vec4 tex = texture2D(texture, uv);
+            vec4 tex = texture(tex, uv);
             color = vec4(1.0, 1.0, 1.0, 1.0) * tex.r;
         }
     ";
@@ -330,7 +330,7 @@ fn load_font() -> FontMap {
     let uni_texture;
     let uni_transform;
     {
-        let name = CString::new("texture").unwrap();
+        let name = CString::new("tex").unwrap();
         uni_texture = unsafe{ gl::GetUniformLocation(program, name.as_ptr()) };
         let name = CString::new("transform").unwrap();
         uni_transform = unsafe{ gl::GetUniformLocation(program, name.as_ptr()) };
@@ -376,10 +376,10 @@ fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2)
     unsafe {
         gl::Enable(gl::BLEND);
 
+        gl::ActiveTexture(gl::TEXTURE0);
+
         gl::UseProgram(font.shader);
         gl::Uniform1i(font.uni_texture, 0);
-
-        gl::ActiveTexture(gl::TEXTURE0);
     }
 
     let mut pen = *pos;
@@ -776,6 +776,7 @@ fn main() {
 
     let mut projection = ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
     let mut hold: Option<Vector2> = None;
+    let mut zoom = 0.0;
     let mut scale = 1.0;
     let mut viewport_pos = Vector2::new(0.0, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
@@ -785,21 +786,19 @@ fn main() {
 
         display.size_change = false;
 
-        let mut zoom = 0.0;
+        let mut dzoom = 0.0;
         for (_, event) in glfw::flush_messages(&events) {
-            glfw_handle_event(&mut window, event, &mut display, &mut zoom);
+            glfw_handle_event(&mut window, event, &mut display, &mut dzoom);
         }
 
-        if zoom != 0.0 {
-            let old_scale = scale;
-            scale *= 1.0 + zoom;
+        if dzoom != 0.0 {
+            zoom += dzoom;
+            zoom = zoom.clamp(0.0, 100.0);
 
-            // Limit the scale to some sensible? values
-            scale = scale.clamp(1.0, 1000.0);
-            zoom = scale/old_scale - 1.0;
+            scale = f32::powf(2.0, zoom);
 
-            viewport_pos.x += display.mouse_x as f32 / scale * zoom;
-            viewport_pos.y += display.mouse_y as f32 / scale * zoom;
+            // viewport_pos.x += display.mouse_x as f32 / scale * dzoom;
+            // viewport_pos.y += display.mouse_y as f32 / scale * dzoom;
         }
 
         {
@@ -911,7 +910,7 @@ fn main() {
             }
         }
 
-        draw_ascii(&projection, &font, format!("Zoom level {}", f32::log2(scale).floor()).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Zoom level {}", zoom.floor()).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
     }
