@@ -245,7 +245,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/System/Library/Fonts/Optima.ttc", 0).unwrap();
+    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -374,6 +374,7 @@ fn load_font() -> FontMap {
 
 fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
     unsafe {
+        gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
         gl::Enable(gl::BLEND);
 
         gl::ActiveTexture(gl::TEXTURE0);
@@ -768,9 +769,6 @@ fn main() {
     */
     let file = std::fs::File::open("aalborg.mvt").unwrap();
     let tile = compile_tile(0, 0, 0, file).unwrap();
-    let file = std::fs::File::open("aalborg.mvt").unwrap();
-    let ctile = compile_tile(1, 1, 1, file).unwrap();
-    let ptile = placeholder_tile(1, 0, 1);
 
     // -------------------------------------------
 
@@ -801,6 +799,8 @@ fn main() {
             // viewport_pos.y += display.mouse_y as f32 / scale * dzoom;
         }
 
+        let scale_level = f32::log2(scale).floor() as u64;
+
         {
             // Calculate the mouse position in the world
             mouse_world.x = display.mouse_x as f32;
@@ -826,11 +826,25 @@ fn main() {
             hold = None;
         }
 
-        let visible_tiles = vec![
-            &tile,
-            &ctile,
-            &ptile,
-        ];
+        let mut visible_tiles: Vec<Tile>;
+        {
+            let native_resolution = MAP_SIZE as f32 / 2.0_f32.powi(scale_level as i32) as f32;
+            let left = (viewport_pos.x / native_resolution).floor() as i64;
+            let top = (viewport_pos.y / native_resolution).floor() as i64;
+            let right = ((viewport_pos.x + (display.width as f32/scale)) / native_resolution).ceil() as i64;
+            let bottom = ((viewport_pos.y + (display.height as f32/scale)) / native_resolution).ceil() as i64;
+            dbg!(left, top, right, bottom);
+
+            visible_tiles = vec![
+            ];
+            for x in left.max(0)..right.max(0) {
+                for y in top.max(0)..bottom.max(0) {
+                    let ptile = placeholder_tile(x as u64, y as u64, scale_level as u8);
+                    visible_tiles.push(ptile);
+                }
+            }
+        }
+
 
         let camera_matrix = mat4_multply(&mat4_translate(-viewport_pos.x, -viewport_pos.y), &mat4_scale(scale));
 
@@ -840,8 +854,6 @@ fn main() {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
-        let scale_level = 1;
-
         unsafe {
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::MAX);
             gl::UseProgram(shader_program.program);
@@ -849,14 +861,17 @@ fn main() {
 
         let vp = mat4_multply(&camera_matrix, &projection);
         for tile in visible_tiles {
-            let grid_step = MAP_SIZE / (tile.z as u64+1);
+
+            let grid_step = MAP_SIZE >> tile.z;
 
             // Transform the tilelocal coordinates to global coordinates
             let tile_transform;
+            let tile_move;
             {
-                let xcoord = tile.x * scale_level * grid_step;
-                let ycoord = tile.y * scale_level * grid_step;
-                let tile_matrix = mat4_multply(&mat4_scale(grid_step as f32/ tile.extent as f32), &mat4_translate(xcoord as f32, ycoord as f32));
+                let xcoord = tile.x * grid_step;
+                let ycoord = tile.y * grid_step;
+                tile_move = mat4_translate(xcoord as f32, ycoord as f32);
+                let tile_matrix = mat4_multply(&mat4_scale(grid_step as f32 / tile.extent as f32), &tile_move);
                 tile_transform = mat4_multply(&tile_matrix, &vp);
             }
 
@@ -894,23 +909,31 @@ fn main() {
             }
 
             unsafe {
+                gl::UseProgram(shader_program.program);
+
                 gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform.as_ptr());
                 gl::BindVertexArray(tile.vao);
 
-                gl::Uniform1f(shader_program.width, 3.0);
+                let power = 2.0_f32.powi(scale_level as i32);
+                gl::Uniform1f(shader_program.width, 3.0 * power);
                 gl::Uniform4f(shader_program.fill_color, 0.8, 0.8, 0.8, 1.0);
                 gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
 
-                gl::Uniform1f(shader_program.width, 2.0);
+                gl::Uniform1f(shader_program.width, 2.0 * power);
                 gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
                 gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
 
                 gl::BindVertexArray(0);
                 gl::Disable(gl::SCISSOR_TEST);
             }
+
+            {
+                let text_transform = mat4_multply(&mat4_scale(8.0), &tile_transform);
+                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 10.0));
+            }
         }
 
-        draw_ascii(&projection, &font, format!("Zoom level {}", zoom.floor()).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
     }
