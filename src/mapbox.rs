@@ -655,3 +655,269 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
 
     return Ok((start, vert));
 }
+
+pub mod pmtile {
+    use crate::math::Vector2;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+
+    pub fn coords_to_id(x: u64, y: u64, level: u8) -> u64 {
+        fn rotate(n: i64, xy: &mut [i64; 2], rx: bool, ry: bool) {
+            if !ry {
+                if rx {
+                    xy[0] = n - 1 - xy[0];
+                    xy[1] = n - 1 - xy[1];
+                }
+                let t = xy[0];
+                xy[0] = xy[1];
+                xy[1] = t;
+            }
+        }
+
+
+        let mut acc = 0;
+        let mut tz = 0;
+        while tz < level {
+            acc += (0x1 << tz) * (0x1 << tz);
+            tz += 1;
+        }
+        let n: i64 = 1 << level;
+        let mut d = 0;
+        let mut xy = [x as i64, y as i64];
+        let mut s: i64 = n >> 1;
+        while s > 0 {
+            let rx = xy[0] & s > 0;
+            let ry = xy[1] & s > 0;
+            d += s * s * ((3 * rx as i64) ^ ry as i64);
+            rotate(s, &mut xy, rx, ry);
+            s = s >> 1;
+        }
+        return (acc + d) as u64;
+    }
+
+    pub struct Tile {
+        pub tid: u64,
+        pub x: u64,
+        pub y: u64,
+        pub z: u8,
+        pub extent: u16,
+        pub vao: u32,
+        pub vbo: u32,
+        pub vertex_len: usize,
+    }
+
+    impl Drop for Tile {
+        fn drop(&mut self) {
+            unsafe {
+                gl::DeleteVertexArrays(1, &self.vao);
+                gl::DeleteBuffers(1, &self.vbo);
+            }
+        }
+    }
+
+    fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2, v1: Vector2, connect_previous: bool) {
+        let cx = lv.x;
+        let cy = lv.y;
+
+        let mut ltov = v1.clone();
+        ltov.subv2(&lv);
+
+        let mut normal = ltov.clone();
+        normal.normal();
+        normal.unit();
+
+        let bend_norm_x;
+        let bend_norm_y;
+
+        if connect_previous {
+            let len = verts.len();
+
+            let last_normx = verts[len-2].norm_x;
+            let last_normy = verts[len-2].norm_y;
+
+            let mut join_x = last_normx + normal.x;
+            let mut join_y = last_normy + normal.y;
+            let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
+            join_x /= join_len;
+            join_y /= join_len;
+
+            let cos_angle = normal.x * join_x + normal.y * join_y;
+            let l = 1.0 / cos_angle;
+
+            bend_norm_x = join_x * l;
+            bend_norm_y = join_y * l;
+
+            verts[len-2].norm_x = bend_norm_x;
+            verts[len-2].norm_y = bend_norm_y;
+            verts[len-3].norm_x = -bend_norm_x;
+            verts[len-3].norm_y = -bend_norm_y;
+            verts[len-4].norm_x = bend_norm_x;
+            verts[len-4].norm_y = bend_norm_y;
+        } else {
+            bend_norm_x = normal.x;
+            bend_norm_y = normal.y;
+        }
+
+        // Now construct the tris
+        verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+        verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+
+        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+        verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+    }
+
+    static mut TILE_NUM  : u64 = 0;
+    fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
+        let mut verts: Vec<super::LineVert> = vec![];
+
+        let mut lv = Vector2::new(0.0, 0.0);
+
+        {
+            let nv = Vector2::new(0.0, 4096.0);
+            add_point(&mut verts, lv, nv, false);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(4096.0, 4096.0);
+            add_point(&mut verts, lv, nv, true);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(4096.0, 0.0);
+            add_point(&mut verts, lv, nv, true);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(0.0, 0.0);
+            add_point(&mut verts, lv, nv, true);
+        }
+
+        let mut vao = 0;
+        unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+        let mut vbo = 0;
+        unsafe { gl::GenBuffers(1, &mut vbo) };
+
+        unsafe {
+            gl::BindVertexArray(vao);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<super::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+            gl::EnableVertexAttribArray(0);
+            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(1);
+            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(2);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl::BindVertexArray(0);
+        }
+
+        let tid = unsafe { TILE_NUM +=1; TILE_NUM };
+        return Tile{
+            tid,
+            x,
+            y,
+            z,
+            extent: 4096,
+            vao,
+            vbo,
+            vertex_len: verts.len(),
+        };
+    }
+
+    pub struct File {
+        file: std::fs::File,
+    }
+
+    impl File {
+        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
+            let file = std::fs::File::open("aalborg.pmtiles").unwrap();
+            return File {
+                file,
+            };
+        }
+
+        fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Tile {
+            return placeholder_tile(x, y, level);
+        }
+    }
+
+    pub struct LiveTiles {
+        source: File,
+
+        // @CLEANUP: Get rid of this Rc somehow
+        active: HashMap<u64, std::rc::Rc<Tile>>,
+        pub visible: Vec<std::rc::Rc<Tile>>,
+    }
+
+    impl LiveTiles {
+        pub fn new(source: File) -> Self {
+            return LiveTiles {
+                source,
+                active: HashMap::new(),
+                visible: vec![],
+            };
+        }
+
+        pub fn retrieve_visible_tiles(&mut self, left: u64, top: u64, right: u64, bottom: u64, level: u8) {
+            let mut keys: HashSet<u64> = self.active.keys().cloned().collect();
+
+            self.visible = vec![];
+
+            for x in left.max(0)..right.max(0) {
+                for y in top.max(0)..bottom.max(0) {
+                    let id = coords_to_id(x, y, level);
+                    keys.remove(&id);
+                    if !self.active.contains_key(&id) {
+                        let ptile = self.source.load_tile(x, y, level);
+                        self.active.insert(id, std::rc::Rc::new(ptile));
+                    }
+
+                }
+            }
+
+            for k in keys {
+                self.active.remove(&k);
+            }
+
+            for x in left.max(0)..right.max(0) {
+                for y in top.max(0)..bottom.max(0) {
+                    let id = coords_to_id(x, y, level);
+                    self.visible.push(self.active.get(&id).unwrap().clone());
+                }
+            }
+
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tileid_outermost_layer() {
+            let id = coords_to_id(0, 0, 0);
+            assert_eq!(id, 0);
+        }
+
+        #[test]
+        fn tileid_first_tile_under_outermost() {
+            let id = coords_to_id(0, 0, 1);
+            assert_eq!(id, 1);
+        }
+
+        #[test]
+        fn tileid_third_tile_under_outermost() {
+            let id = coords_to_id(1, 1, 1);
+            assert_eq!(id, 3);
+        }
+    }
+}

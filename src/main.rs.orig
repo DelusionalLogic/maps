@@ -1,11 +1,9 @@
 mod triangulate;
-mod math;
 mod mapbox;
 
 extern crate freetype;
 
 use triangulate::triangulate;
-use math::Vector2;
 use std::convert::TryInto;
 use std::ffi::CString;
 
@@ -16,6 +14,67 @@ use gl;
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
+
+#[derive(Debug, Clone, Copy)]
+struct Vector2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vector2 {
+    pub fn new(x: f32, y: f32) -> Self {
+        return Vector2 {
+            x,
+            y,
+        }
+    }
+
+    pub fn addf(&mut self, val: f32) {
+        self.x += val;
+        self.y += val;
+    }
+
+    pub fn divf(&mut self, val: f32) {
+        self.x /= val;
+        self.y /= val;
+    }
+
+    pub fn addv2(&mut self, other: &Vector2) {
+        self.x += other.x;
+        self.y += other.y;
+    }
+
+    pub fn subv2(&mut self, other: &Vector2) {
+        self.x -= other.x;
+        self.y -= other.y;
+    }
+
+    pub fn normal(&mut self) {
+        let x = self.x;
+        self.x = self.y;
+        self.y = -x;
+    }
+
+    pub fn len(&self) -> f32 {
+        return (self.x.powi(2) + self.y.powi(2)).sqrt();
+    }
+
+    pub fn unit(&mut self) {
+        let len = self.len();
+        self.x /= len;
+        self.y /= len;
+    }
+
+    pub fn apply_transform(&mut self, mat: &[f32; 9]) {
+        self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
+        self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
+    }
+
+    pub fn mulv2(&mut self, other: &Vector2) {
+        self.x *= other.x;
+        self.y *= other.y;
+    }
+}
 
 fn compile_shader(vert: &str, frag: &str) -> u32 {
     let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
@@ -186,7 +245,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
+    let face = freetype.new_face("/System/Library/Fonts/Optima.ttc", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -344,7 +403,26 @@ fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2)
     }
 }
 
-fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<mapbox::pmtile::Tile, String> {
+struct Tile {
+    x: u64,
+    y: u64,
+    z: u8,
+    extent: u16,
+    vao: u32,
+    vbo: u32,
+    vertex_len: usize,
+}
+
+impl Drop for Tile {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteVertexArrays(1, &self.vao);
+            gl::DeleteBuffers(1, &self.vbo);
+        }
+    }
+}
+
+fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<Tile, String> {
     let (start, verts) = mapbox::read_one_linestring(&mut mapbox::pbuf::Message::new(&mut file)).unwrap();
 
     let mut vao = 0;
@@ -371,8 +449,7 @@ fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<mapbox
     }
 
     // @INCOMPLETE @CLEANUP: The extent here should be read from the file
-    return Ok(mapbox::pmtile::Tile{
-        tid: 0,
+    return Ok(Tile{
         x,
         y,
         z,
@@ -383,7 +460,125 @@ fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<mapbox
     });
 }
 
+fn add_point(verts: &mut Vec<mapbox::LineVert>, lv: Vector2, v1: Vector2, connect_previous: bool) {
+    let cx = lv.x;
+    let cy = lv.y;
+
+    let mut ltov = v1.clone();
+    ltov.subv2(&lv);
+
+    let mut normal = ltov.clone();
+    normal.normal();
+    normal.unit();
+
+    let bend_norm_x;
+    let bend_norm_y;
+
+    if connect_previous {
+        let len = verts.len();
+
+        let last_normx = verts[len-2].norm_x;
+        let last_normy = verts[len-2].norm_y;
+
+        let mut join_x = last_normx + normal.x;
+        let mut join_y = last_normy + normal.y;
+        let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
+        join_x /= join_len;
+        join_y /= join_len;
+
+        let cos_angle = normal.x * join_x + normal.y * join_y;
+        let l = 1.0 / cos_angle;
+
+        bend_norm_x = join_x * l;
+        bend_norm_y = join_y * l;
+
+        verts[len-2].norm_x = bend_norm_x;
+        verts[len-2].norm_y = bend_norm_y;
+        verts[len-3].norm_x = -bend_norm_x;
+        verts[len-3].norm_y = -bend_norm_y;
+        verts[len-4].norm_x = bend_norm_x;
+        verts[len-4].norm_y = bend_norm_y;
+    } else {
+        bend_norm_x = normal.x;
+        bend_norm_y = normal.y;
+    }
+
+    // Now construct the tris
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+    verts.push(mapbox::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+    verts.push(mapbox::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+}
+
+fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
+    let mut verts: Vec<mapbox::LineVert> = vec![];
+
+    let mut lv = Vector2::new(0.0, 0.0);
+
+    {
+        let nv = Vector2::new(0.0, 4096.0);
+        add_point(&mut verts, lv, nv, false);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(4096.0, 4096.0);
+        add_point(&mut verts, lv, nv, true);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(4096.0, 0.0);
+        add_point(&mut verts, lv, nv, true);
+        lv = nv;
+    }
+
+    {
+        let nv = Vector2::new(0.0, 0.0);
+        add_point(&mut verts, lv, nv, true);
+    }
+
+    let mut vao = 0;
+    unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+    let mut vbo = 0;
+    unsafe { gl::GenBuffers(1, &mut vbo) };
+
+    unsafe {
+        gl::BindVertexArray(vao);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<mapbox::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, 0 as *const _);
+        gl::EnableVertexAttribArray(0);
+        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(1);
+        gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+        gl::EnableVertexAttribArray(2);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+
+    return Tile{
+        x,
+        y,
+        z,
+        extent: 4096,
+        vao,
+        vbo,
+        vertex_len: verts.len(),
+    };
+}
+
 fn main() {
+    // Load font
+    // dbg!(x);
+
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
     glfw.window_hint(glfw::WindowHint::ContextVersion(3, 3));
     glfw.window_hint(glfw::WindowHint::OpenGlProfile(glfw::OpenGlProfileHint::Core));
@@ -584,7 +779,6 @@ fn main() {
     let mut viewport_pos = Vector2::new(0.0, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
-    let mut tiles = mapbox::pmtile::LiveTiles::new(mapbox::pmtile::File::new("aalborg.pmtiles"));
     while !window.should_close() {
         glfw.poll_events();
 
@@ -601,8 +795,8 @@ fn main() {
 
             scale = f32::powf(2.0, zoom);
 
-            viewport_pos.x += display.mouse_x as f32 / scale * dzoom;
-            viewport_pos.y += display.mouse_y as f32 / scale * dzoom;
+            // viewport_pos.x += display.mouse_x as f32 / scale * dzoom;
+            // viewport_pos.y += display.mouse_y as f32 / scale * dzoom;
         }
 
         let scale_level = f32::log2(scale).floor() as u64;
@@ -632,14 +826,23 @@ fn main() {
             hold = None;
         }
 
+        let mut visible_tiles: Vec<Tile>;
         {
             let native_resolution = MAP_SIZE as f32 / 2.0_f32.powi(scale_level as i32) as f32;
-            let left = ((viewport_pos.x / native_resolution).floor() as i64).max(0) as u64;
-            let top = ((viewport_pos.y / native_resolution).floor() as i64).max(0) as u64;
-            let right = (((viewport_pos.x + (display.width as f32/scale)) / native_resolution).ceil() as i64).max(0) as u64;
-            let bottom = (((viewport_pos.y + (display.height as f32/scale)) / native_resolution).ceil() as i64).max(0) as u64;
+            let left = (viewport_pos.x / native_resolution).floor() as i64;
+            let top = (viewport_pos.y / native_resolution).floor() as i64;
+            let right = ((viewport_pos.x + (display.width as f32/scale)) / native_resolution).ceil() as i64;
+            let bottom = ((viewport_pos.y + (display.height as f32/scale)) / native_resolution).ceil() as i64;
+            dbg!(left, top, right, bottom);
 
-            tiles.retrieve_visible_tiles(left, top, right, bottom, scale_level as u8);
+            visible_tiles = vec![
+            ];
+            for x in left.max(0)..right.max(0) {
+                for y in top.max(0)..bottom.max(0) {
+                    let ptile = placeholder_tile(x as u64, y as u64, scale_level as u8);
+                    visible_tiles.push(ptile);
+                }
+            }
         }
 
 
@@ -657,7 +860,7 @@ fn main() {
         }
 
         let vp = mat4_multply(&camera_matrix, &projection);
-        for tile in &tiles.visible {
+        for tile in visible_tiles {
 
             let grid_step = MAP_SIZE >> tile.z;
 
@@ -727,11 +930,14 @@ fn main() {
             {
                 let text_transform = mat4_multply(&mat4_scale(8.0), &tile_transform);
                 draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 10.0));
-                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 20.0));
             }
         }
 
+<<<<<<< HEAD
+        draw_ascii(&projection, &font, format!("Zoom level {}", zoom.floor()).as_bytes(), &Vector2::new(100.0, 100.0));
+=======
         draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
+>>>>>>> a588507 (Calculate the tile extents)
 
         window.swap_buffers();
     }
