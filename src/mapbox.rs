@@ -660,6 +660,75 @@ pub mod pmtile {
     use crate::math::Vector2;
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::io::Read;
+    use std::io::Seek;
+    use flate2::bufread::GzDecoder;
+
+    struct BinarySlice {
+        data: Vec<u8>,
+        cursor: usize,
+    }
+
+    impl BinarySlice {
+        pub fn from_read<T: Read + Seek>(read: &mut T, start: u64, len: usize) -> Self {
+
+            let mut slice = BinarySlice {
+                data: Vec::with_capacity(len),
+                cursor: 0,
+            };
+
+            read.seek(std::io::SeekFrom::Start(start)).unwrap();
+            slice.data.resize(len, 0);
+            read.read_exact(&mut slice.data).unwrap();
+
+            return slice;
+        }
+
+        pub fn from_read_decompress<T: Read + Seek>(read: &mut T, start: u64, len: usize) -> Self {
+            let mut buf = Vec::with_capacity(len);
+            read.seek(std::io::SeekFrom::Start(start)).unwrap();
+            buf.resize(len, 0);
+            read.read_exact(&mut buf).unwrap();
+
+            let mut slice = BinarySlice {
+                data: Vec::new(),
+                cursor: 0,
+            };
+
+            let mut reader = GzDecoder::new(buf.as_slice());
+            reader.read_to_end(&mut slice.data).unwrap();
+
+            return slice;
+        }
+
+        pub fn skip(&mut self, size: usize) {
+            self.cursor += size;
+        }
+
+        pub fn u64(&mut self) -> u64 {
+            dbg!(self.cursor);
+            let end = self.cursor+std::mem::size_of::<u64>();
+            let val = u64::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
+            self.cursor = end;
+            return val;
+        }
+
+        pub fn u16(&mut self) -> u16 {
+            dbg!(self.cursor);
+            let end = self.cursor+std::mem::size_of::<u16>();
+            let val = u16::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
+            self.cursor = end;
+            return val;
+        }
+
+        pub fn u8(&mut self) -> u8 {
+            dbg!(self.cursor);
+            let end = self.cursor+std::mem::size_of::<u8>();
+            let val = u8::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
+            self.cursor = end;
+            return val;
+        }
+    }
 
     pub fn coords_to_id(x: u64, y: u64, level: u8) -> u64 {
         fn rotate(n: i64, xy: &mut [i64; 2], rx: bool, ry: bool) {
@@ -833,19 +902,173 @@ pub mod pmtile {
         };
     }
 
+    #[derive(Debug)]
+    enum Compression {
+        None,
+        GZip,
+        Brotli,
+        Zstd,
+    }
+
+    impl From<u8> for Compression {
+        fn from(i: u8) -> Self {
+            match i {
+                1 => Compression::None,
+                2 => Compression::GZip,
+                3 => Compression::Brotli,
+                4 => Compression::Zstd,
+                _ => panic!("Unknown compression"),
+            }
+        }
+
+    }
+
     pub struct File {
         file: std::fs::File,
+        root_offset: u64,
+        root_len: usize,
+
+        internal_compression: Compression,
+        tile_compression: Compression,
+
+        min_zoom: u8,
+        max_zoom: u8,
     }
 
     impl File {
         pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
-            let file = std::fs::File::open("aalborg.pmtiles").unwrap();
+            let mut file = std::fs::File::open(path).unwrap();
+
+            let mut slice: BinarySlice = BinarySlice::from_read(&mut file, 0, 127);
+            assert!(slice.u16() == 0x4d50); // Check for PM header
+            slice.skip(5);
+            assert!(slice.u8() == 3); // Version
+
+            let root_offset = slice.u64();
+            let root_len = slice.u64() as usize;
+
+            slice.skip(73);
+
+            let internal_compression = slice.u8().into();
+            let tile_compression = slice.u8().into();
+
+            assert!(slice.u8() == 1); // Tile type (MVT)
+
+            let min_zoom = slice.u8();
+            let max_zoom = slice.u8();
+
             return File {
                 file,
+                root_offset,
+                root_len,
+                internal_compression,
+                tile_compression,
+                min_zoom,
+                max_zoom,
             };
         }
 
         fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Tile {
+            if level > self.max_zoom || level < self.min_zoom {
+                return placeholder_tile(x, y, level);
+            }
+
+            let needle = coords_to_id(x, y, level);
+
+            fn read_varint(slice: &mut BinarySlice) -> u64 {
+                let mut value: u64 = 0;
+
+                let mut i = 0;
+                loop {
+                    let n = slice.u8();
+
+                    value |= (n as u64 & 0x7F) << i;
+
+                    i += 7;
+                    if n & 0x80 == 0 {
+                        break;
+                    }
+                }
+
+                return value;
+            }
+
+            let mut offset = self.root_offset;
+            let mut len = self.root_len;
+            loop {
+                dbg!("File", offset, len, &self.internal_compression);
+                let mut slice = BinarySlice::from_read_decompress(&mut self.file, offset, len);
+                let entries = read_varint(&mut slice);
+                dbg!(entries);
+                assert!(entries > 0);
+
+                let mut entry = None;
+                // The first array in the directory is the 
+                let mut pval = 0;
+                for i in 0..entries {
+                    let val = read_varint(&mut slice);
+
+                    if entry.is_none() {
+                        pval += val;
+                        if pval > needle {
+                            pval -= val;
+                            entry = Some(i-1);
+                        }
+                    }
+                }
+                let entry = entry.unwrap_or(entries);
+
+                let runlength;
+                {
+                    // Skip the unused before
+                    for _ in 0..entry {
+                        read_varint(&mut slice);
+                    }
+                    runlength = read_varint(&mut slice);
+                    // Skip the ones after
+                    for _ in entry+1..entries {
+                        read_varint(&mut slice);
+                    }
+                }
+
+                let elen;
+                {
+                    // Skip the unused before
+                    for _ in 0..entry {
+                        read_varint(&mut slice);
+                    }
+                    elen = read_varint(&mut slice);
+                    // Skip the ones after
+                    for _ in entry+1..entries {
+                        read_varint(&mut slice);
+                    }
+                }
+
+                let eoffset;
+                {
+                    // Skip the unused before
+                    for _ in 0..entry {
+                        read_varint(&mut slice);
+                    }
+                    eoffset = read_varint(&mut slice);
+                    // Skip the ones after
+                    for _ in entry+1..entries {
+                        read_varint(&mut slice);
+                    }
+                }
+
+                dbg!(pval, runlength, needle, entry, eoffset, elen);
+                if runlength == 0 {
+                    offset = eoffset;
+                    len = elen as usize;
+                    continue;
+                }
+
+                assert!(pval + runlength > needle);
+
+                break;
+            }
+
             return placeholder_tile(x, y, level);
         }
     }

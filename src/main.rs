@@ -572,8 +572,8 @@ fn main() {
         gl::BindVertexArray(0);
     }
     */
-    let file = std::fs::File::open("aalborg.mvt").unwrap();
-    let tile = compile_tile(0, 0, 0, file).unwrap();
+    // let file = std::fs::File::open("aalborg.mvt").unwrap();
+    // let tile = compile_tile(0, 0, 0, file).unwrap();
 
     // -------------------------------------------
 
