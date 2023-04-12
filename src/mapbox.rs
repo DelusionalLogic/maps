@@ -131,7 +131,7 @@ pub mod pbuf {
 
     impl <'a, T: Read> Message<'a, T> {
         pub fn new(reader: &'a mut T) -> Self {
-            return Self { 
+            return Self {
                 reader: BoundedRead::new(reader),
                 stack: vec![],
             }
@@ -538,11 +538,11 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                 'layer: while let Ok(field) = reader.next() {
                     match field {
                         pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                        pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 15} => { 
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 15} => {
                             let version = reader.read_var_int()?;
                             assert_eq!(version, 2);
                         }
-                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => { 
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
                             let name = reader.read_string()?;
                             if name != "roads" {
                                 reader.exit_message()?;
@@ -551,13 +551,13 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
 
                             seen_name = true;
                         }
-                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => { 
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
                             assert!(seen_name);
                             reader.enter_message()?;
                             let mut seen_type = false;
                             'feature: while let Ok(field) = reader.next() {
                                 match field {
-                                    pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => { 
+                                    pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
                                         if reader.read_var_int()? != 2 {
                                             reader.exit_message()?;
                                             break 'feature;
@@ -565,7 +565,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
 
                                         seen_type = true;
                                     },
-                                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => { 
+                                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
                                         if !seen_type {
                                             reader.exit_message()?;
                                             break 'feature;
@@ -663,10 +663,23 @@ pub mod pmtile {
     use std::io::Read;
     use std::io::Seek;
     use flate2::bufread::GzDecoder;
+    use super::pbuf;
+    use core::ptr::NonNull;
 
     struct BinarySlice {
         data: Vec<u8>,
         cursor: usize,
+    }
+
+    impl Read for BinarySlice {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let end = (self.cursor + buf.len()).min(self.data.len());
+            let len = end - self.cursor;
+            buf[0..len].copy_from_slice(&self.data[self.cursor..end]);
+
+            self.cursor = end;
+            return Ok(len);
+        }
     }
 
     impl BinarySlice {
@@ -684,7 +697,7 @@ pub mod pmtile {
             return slice;
         }
 
-        pub fn from_read_decompress<T: Read + Seek>(read: &mut T, start: u64, len: usize) -> Self {
+        pub fn from_read_decompress<T: Read + Seek>(read: &mut T, compression: &Compression, start: u64, len: usize) -> Self {
             let mut buf = Vec::with_capacity(len);
             read.seek(std::io::SeekFrom::Start(start)).unwrap();
             buf.resize(len, 0);
@@ -695,8 +708,15 @@ pub mod pmtile {
                 cursor: 0,
             };
 
-            let mut reader = GzDecoder::new(buf.as_slice());
-            reader.read_to_end(&mut slice.data).unwrap();
+            match compression {
+                Compression::GZip => {
+                    let mut reader = GzDecoder::new(buf.as_slice());
+                    reader.read_to_end(&mut slice.data).unwrap();
+                }
+                Compression::None => panic!(),
+                Compression::Brotli => panic!(),
+                Compression::Zstd => panic!(),
+            }
 
             return slice;
         }
@@ -706,7 +726,6 @@ pub mod pmtile {
         }
 
         pub fn u64(&mut self) -> u64 {
-            dbg!(self.cursor);
             let end = self.cursor+std::mem::size_of::<u64>();
             let val = u64::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
             self.cursor = end;
@@ -714,7 +733,6 @@ pub mod pmtile {
         }
 
         pub fn u16(&mut self) -> u16 {
-            dbg!(self.cursor);
             let end = self.cursor+std::mem::size_of::<u16>();
             let val = u16::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
             self.cursor = end;
@@ -722,7 +740,6 @@ pub mod pmtile {
         }
 
         pub fn u8(&mut self) -> u8 {
-            dbg!(self.cursor);
             let end = self.cursor+std::mem::size_of::<u8>();
             let val = u8::from_le_bytes(self.data[self.cursor..end].try_into().unwrap());
             self.cursor = end;
@@ -837,8 +854,48 @@ pub mod pmtile {
         verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
     }
 
+    fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
+        let (start, verts) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
+
+        let mut vao = 0;
+        unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+        let mut vbo = 0;
+        unsafe { gl::GenBuffers(1, &mut vbo) };
+
+        unsafe {
+            gl::BindVertexArray(vao);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<super::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+            gl::EnableVertexAttribArray(0);
+            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(1);
+            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(2);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl::BindVertexArray(0);
+        }
+
+        // @INCOMPLETE @CLEANUP: The extent here should be read from the file
+        let tid = unsafe { TILE_NUM +=1; TILE_NUM };
+        return Ok(Tile{
+            tid,
+            x,
+            y,
+            z,
+            extent: 4096,
+            vao,
+            vbo,
+            vertex_len: verts.len(),
+        });
+    }
+
     static mut TILE_NUM  : u64 = 0;
-    fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
+    pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
         let mut verts: Vec<super::LineVert> = vec![];
 
         let mut lv = Vector2::new(0.0, 0.0);
@@ -902,6 +959,103 @@ pub mod pmtile {
         };
     }
 
+    pub enum DEntry {
+        Leaf(u64, usize),
+        Tile(u64, u64, u64, usize),
+    }
+
+    pub struct Directory {
+        id: Vec<u64>,
+        runlength: Vec<u64>,
+        len: Vec<usize>,
+        offset: Vec<u64>,
+
+        next: Option<NonNull<Directory>>,
+        prev: Option<NonNull<Directory>>,
+    }
+
+    impl Directory {
+        fn parse(slice: &mut BinarySlice) -> Self {
+            fn read_varint(slice: &mut BinarySlice) -> u64 {
+                let mut value: u64 = 0;
+
+                let mut i = 0;
+                loop {
+                    let n = slice.u8();
+
+                    value |= (n as u64 & 0x7F) << i;
+
+                    i += 7;
+                    if n & 0x80 == 0 {
+                        break;
+                    }
+                }
+
+                return value;
+            }
+
+            let num_entries = read_varint(slice) as usize;
+            assert!(num_entries > 0);
+
+            let mut id = Vec::with_capacity(num_entries);
+            let mut runlength = Vec::with_capacity(num_entries);
+            let mut len = Vec::with_capacity(num_entries);
+            let mut offset = Vec::with_capacity(num_entries);
+
+            let mut pval = 0;
+            for _ in 0..num_entries {
+                let val = read_varint(slice);
+                pval += val;
+                id.push(pval);
+            }
+
+            for _ in 0..num_entries {
+                let val = read_varint(slice);
+                runlength.push(val);
+            }
+
+            for _ in 0..num_entries {
+                let val = read_varint(slice) as usize;
+                len.push(val);
+            }
+
+            let mut eoffset = 0;
+            for i in 0..num_entries {
+                let val = read_varint(slice);
+                if val == 0 {
+                    eoffset += len[i-1] as u64;
+                } else {
+                    eoffset = val-1;
+                }
+                offset.push(eoffset);
+            }
+
+            return Directory {
+                id,
+                runlength,
+                len,
+                offset,
+
+                next: None,
+                prev: None,
+            };
+        }
+
+        fn find_entry(&self, id: u64) -> DEntry {
+            let index = match self.id.binary_search(&id) {
+                Ok(x) => x,
+                Err(x) => x-1,
+            };
+
+            if self.runlength[index] == 0 {
+                return DEntry::Leaf(self.offset[index], self.len[index]);
+            }
+
+            return DEntry::Tile(self.id[index], self.runlength[index], self.offset[index], self.len[index]);
+        }
+
+    }
+
     #[derive(Debug)]
     enum Compression {
         None,
@@ -928,11 +1082,20 @@ pub mod pmtile {
         root_offset: u64,
         root_len: usize,
 
+        leaf_offset: u64,
+        leaf_len: usize,
+        tile_offset: u64,
+        tile_len: usize,
+
         internal_compression: Compression,
         tile_compression: Compression,
 
         min_zoom: u8,
         max_zoom: u8,
+
+        fdir: Option<NonNull<Directory>>,
+        ldir: Option<NonNull<Directory>>,
+        dcache: HashMap<u64, Directory>,
     }
 
     impl File {
@@ -947,7 +1110,14 @@ pub mod pmtile {
             let root_offset = slice.u64();
             let root_len = slice.u64() as usize;
 
-            slice.skip(73);
+            slice.skip(16);
+
+            let leaf_offset = slice.u64();
+            let leaf_len = slice.u64() as usize;
+            let tile_offset = slice.u64();
+            let tile_len = slice.u64() as usize;
+
+            slice.skip(25);
 
             let internal_compression = slice.u8().into();
             let tile_compression = slice.u8().into();
@@ -961,115 +1131,99 @@ pub mod pmtile {
                 file,
                 root_offset,
                 root_len,
+                leaf_offset,
+                leaf_len,
+                tile_offset,
+                tile_len,
                 internal_compression,
                 tile_compression,
                 min_zoom,
                 max_zoom,
+
+                fdir: None,
+                ldir: None,
+                dcache: HashMap::new(),
             };
         }
 
-        fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Tile {
-            if level > self.max_zoom || level < self.min_zoom {
-                return placeholder_tile(x, y, level);
-            }
+        fn read_directory(&mut self, offset: u64, len: usize) -> &Directory {
+            match self.dcache.entry(offset) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    let mut dir = e.into_mut();
 
-            let needle = coords_to_id(x, y, level);
-
-            fn read_varint(slice: &mut BinarySlice) -> u64 {
-                let mut value: u64 = 0;
-
-                let mut i = 0;
-                loop {
-                    let n = slice.u8();
-
-                    value |= (n as u64 & 0x7F) << i;
-
-                    i += 7;
-                    if n & 0x80 == 0 {
-                        break;
+                    // Unlink the item
+                    if let Some(mut x) = dir.prev {
+                        // Not the first item, relink
+                        unsafe{x.as_mut().next = dir.next};
+                    } else {
+                        // The first item already
+                        return dir;
                     }
-                }
 
-                return value;
+                    if let Some(mut x) = dir.next {
+                        // Not the last item, relink
+                        unsafe{x.as_mut().prev = dir.prev};
+                    } else {
+                        // We are the last item and must fixup the tail pointer
+                        self.ldir = dir.prev;
+                    }
+
+                    // Attach to the start
+                    if let Some(mut x) = self.fdir {
+                        dir.next = self.fdir;
+                        unsafe {x.as_mut().prev = Some(dir.into())};
+                    }
+                    self.fdir = Some(dir.into());
+
+                    return dir;
+                },
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let mut slice = BinarySlice::from_read_decompress(&mut self.file, &self.internal_compression, offset, len);
+                    let dir = Directory::parse(&mut slice);
+
+                    let mut dir = e.insert(dir);
+
+                    // Attach the new directory to the start of the lru
+                    if let Some(mut x) = self.fdir {
+                        dir.next = self.fdir;
+                        unsafe {x.as_mut().prev = Some(dir.into())};
+                    }
+                    self.fdir = Some(dir.into());
+
+                    return dir;
+                },
+            };
+        }
+
+        fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Option<Tile> {
+            if level > self.max_zoom || level < self.min_zoom {
+                return None;
             }
+
+            let tid = coords_to_id(x, y, level);
 
             let mut offset = self.root_offset;
             let mut len = self.root_len;
             loop {
-                dbg!("File", offset, len, &self.internal_compression);
-                let mut slice = BinarySlice::from_read_decompress(&mut self.file, offset, len);
-                let entries = read_varint(&mut slice);
-                dbg!(entries);
-                assert!(entries > 0);
+                let dir = self.read_directory(offset, len);
 
-                let mut entry = None;
-                // The first array in the directory is the 
-                let mut pval = 0;
-                for i in 0..entries {
-                    let val = read_varint(&mut slice);
-
-                    if entry.is_none() {
-                        pval += val;
-                        if pval > needle {
-                            pval -= val;
-                            entry = Some(i-1);
+                match dir.find_entry(tid) {
+                    DEntry::Tile(pval, runlength, eoffset, elen) => {
+                        if pval + runlength <= tid {
+                            return None;
                         }
-                    }
+                        assert!(eoffset + (elen as u64) < self.tile_len as u64);
+
+                        let mut tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
+                        return Some(compile_tile(x, y, level, &mut tile_slice).unwrap());
+                    },
+                    DEntry::Leaf(eoffset, elen) => {
+                        assert!(eoffset + (elen as u64) < self.leaf_len as u64);
+                        offset = eoffset + self.leaf_offset;
+                        len = elen;
+                    },
                 }
-                let entry = entry.unwrap_or(entries);
-
-                let runlength;
-                {
-                    // Skip the unused before
-                    for _ in 0..entry {
-                        read_varint(&mut slice);
-                    }
-                    runlength = read_varint(&mut slice);
-                    // Skip the ones after
-                    for _ in entry+1..entries {
-                        read_varint(&mut slice);
-                    }
-                }
-
-                let elen;
-                {
-                    // Skip the unused before
-                    for _ in 0..entry {
-                        read_varint(&mut slice);
-                    }
-                    elen = read_varint(&mut slice);
-                    // Skip the ones after
-                    for _ in entry+1..entries {
-                        read_varint(&mut slice);
-                    }
-                }
-
-                let eoffset;
-                {
-                    // Skip the unused before
-                    for _ in 0..entry {
-                        read_varint(&mut slice);
-                    }
-                    eoffset = read_varint(&mut slice);
-                    // Skip the ones after
-                    for _ in entry+1..entries {
-                        read_varint(&mut slice);
-                    }
-                }
-
-                dbg!(pval, runlength, needle, entry, eoffset, elen);
-                if runlength == 0 {
-                    offset = eoffset;
-                    len = elen as usize;
-                    continue;
-                }
-
-                assert!(pval + runlength > needle);
-
-                break;
             }
-
-            return placeholder_tile(x, y, level);
         }
     }
 
@@ -1100,8 +1254,9 @@ pub mod pmtile {
                     let id = coords_to_id(x, y, level);
                     keys.remove(&id);
                     if !self.active.contains_key(&id) {
-                        let ptile = self.source.load_tile(x, y, level);
-                        self.active.insert(id, std::rc::Rc::new(ptile));
+                        if let Some(ptile) = self.source.load_tile(x, y, level) {
+                            self.active.insert(id, std::rc::Rc::new(ptile));
+                        }
                     }
 
                 }
@@ -1114,7 +1269,9 @@ pub mod pmtile {
             for x in left.max(0)..right.max(0) {
                 for y in top.max(0)..bottom.max(0) {
                     let id = coords_to_id(x, y, level);
-                    self.visible.push(self.active.get(&id).unwrap().clone());
+                    if self.active.contains_key(&id) {
+                        self.visible.push(self.active.get(&id).unwrap().clone());
+                    }
                 }
             }
 

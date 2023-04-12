@@ -202,8 +202,8 @@ fn load_font() -> FontMap {
         }
     }
 
+    face.set_pixel_sizes(0, 16).unwrap();
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
-    face.set_pixel_sizes(0, 24).unwrap();
     for i in 0..128 {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
         let bitmap = face.glyph().bitmap();
@@ -263,7 +263,7 @@ fn load_font() -> FontMap {
 
         void main() {
             vec4 tex = texture(tex, uv);
-            color = vec4(1.0, 1.0, 1.0, 1.0) * tex.r;
+            color = vec4(tex.r);
         }
     ";
 
@@ -315,7 +315,7 @@ fn load_font() -> FontMap {
 
 fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
     unsafe {
-        gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+        gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
         gl::Enable(gl::BLEND);
 
         gl::ActiveTexture(gl::TEXTURE0);
@@ -342,45 +342,6 @@ fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2)
 
         pen.x += char.advance;
     }
-}
-
-fn compile_tile(x: u64, y: u64, z: u8, mut file: std::fs::File) -> Result<mapbox::pmtile::Tile, String> {
-    let (start, verts) = mapbox::read_one_linestring(&mut mapbox::pbuf::Message::new(&mut file)).unwrap();
-
-    let mut vao = 0;
-    unsafe { gl::GenVertexArrays(1, &mut vao) };
-
-    let mut vbo = 0;
-    unsafe { gl::GenBuffers(1, &mut vbo) };
-
-    unsafe {
-        gl::BindVertexArray(vao);
-
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-        gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<mapbox::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
-
-        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, 0 as *const _);
-        gl::EnableVertexAttribArray(0);
-        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-        gl::EnableVertexAttribArray(1);
-        gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<mapbox::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-        gl::EnableVertexAttribArray(2);
-
-        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-        gl::BindVertexArray(0);
-    }
-
-    // @INCOMPLETE @CLEANUP: The extent here should be read from the file
-    return Ok(mapbox::pmtile::Tile{
-        tid: 0,
-        x,
-        y,
-        z,
-        extent: 4096,
-        vao,
-        vbo,
-        vertex_len: verts.len(),
-    });
 }
 
 fn main() {
@@ -446,7 +407,8 @@ fn main() {
             v_bary = barys[gl_VertexID % 3];
             v_dist = sign;
 
-            vec2 gp = position + normal*tesselation_width;
+            vec2 dnormal = clamp(normal, vec2(-1,-1), vec2(1, 1));
+            vec2 gp = position + dnormal*tesselation_width;
             gl_Position = transform * vec4(gp, 0.0, 1.0);
         }
     ";
@@ -497,9 +459,9 @@ fn main() {
             float invdist = 1-dist;
             float grad = fwidth(invdist);
             float ffactor = clamp(invdist/(feather*grad), 0, 1);
-            color.a *= ffactor;
+            // color *= ffactor;
 
-            // color = mix(edge_color, color, edge_factor());
+            color = mix(edge_color, color, edge_factor());
             // color = vec4(.9, .9, .9, 1.0);
         }
     ";
@@ -574,6 +536,7 @@ fn main() {
     */
     // let file = std::fs::File::open("aalborg.mvt").unwrap();
     // let tile = compile_tile(0, 0, 0, file).unwrap();
+    let border = mapbox::pmtile::placeholder_tile(0, 0, 0);
 
     // -------------------------------------------
 
@@ -633,7 +596,7 @@ fn main() {
         }
 
         {
-            let native_resolution = MAP_SIZE as f32 / 2.0_f32.powi(scale_level as i32) as f32;
+            let native_resolution = MAP_SIZE as f32 / 2.0_f32.powi(scale_level as i32);
             let left = ((viewport_pos.x / native_resolution).floor() as i64).max(0) as u64;
             let top = ((viewport_pos.y / native_resolution).floor() as i64).max(0) as u64;
             let right = (((viewport_pos.x + (display.width as f32/scale)) / native_resolution).ceil() as i64).max(0) as u64;
@@ -652,28 +615,30 @@ fn main() {
         }
 
         unsafe {
+            gl::Enable(gl::BLEND);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::MAX);
+            gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::UseProgram(shader_program.program);
         }
 
         let vp = mat4_multply(&camera_matrix, &projection);
         for tile in &tiles.visible {
 
-            let grid_step = MAP_SIZE >> tile.z;
+            let grid_step = MAP_SIZE as f32 / 2.0_f32.powi(tile.z as i32);
 
             // Transform the tilelocal coordinates to global coordinates
             let tile_transform;
             let tile_move;
             {
-                let xcoord = tile.x * grid_step;
-                let ycoord = tile.y * grid_step;
-                tile_move = mat4_translate(xcoord as f32, ycoord as f32);
-                let tile_matrix = mat4_multply(&mat4_scale(grid_step as f32 / tile.extent as f32), &tile_move);
+                let xcoord = tile.x as f32 * grid_step;
+                let ycoord = tile.y as f32 * grid_step;
+                tile_move = mat4_translate(xcoord, ycoord);
+                let tile_matrix = mat4_multply(&mat4_scale(grid_step / tile.extent as f32), &tile_move);
                 tile_transform = mat4_multply(&tile_matrix, &vp);
             }
 
 
-            // Calculate the screen position of the time and scissor that
+            // Calculate the screen position of the tile and scissor that
             {
                 let mut v1 = Vector2::new(0.0, tile.extent as f32);
                 let mut v2 = Vector2::new(tile.extent as f32, 0.0);
@@ -712,26 +677,38 @@ fn main() {
                 gl::BindVertexArray(tile.vao);
 
                 let power = 2.0_f32.powi(scale_level as i32);
-                gl::Uniform1f(shader_program.width, 3.0 * power);
-                gl::Uniform4f(shader_program.fill_color, 0.8, 0.8, 0.8, 1.0);
-                gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
-
-                gl::Uniform1f(shader_program.width, 2.0 * power);
+                gl::Uniform1f(shader_program.width, 12.0);
                 gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
                 gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
 
                 gl::BindVertexArray(0);
+            }
+
+            unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
+            }
+
+            unsafe {
+                gl::UseProgram(shader_program.program);
+
+                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform.as_ptr());
+                gl::BindVertexArray(border.vao);
+
+                gl::Uniform1f(shader_program.width, 10.0);
+                gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
+                gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
+
+                gl::BindVertexArray(0);
             }
 
             {
                 let text_transform = mat4_multply(&mat4_scale(8.0), &tile_transform);
-                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 10.0));
-                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 20.0));
+                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
+                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
             }
         }
 
-        draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
+        // draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
     }
