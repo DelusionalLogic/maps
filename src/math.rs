@@ -1,61 +1,232 @@
-#[derive(Debug, Clone, Copy)]
-pub struct Vector2 {
-    pub x: f32,
-    pub y: f32,
+pub trait Sqrt {
+    type Output;
+
+    fn sqrt(self) -> Self::Output;
 }
 
-impl Vector2 {
-    pub fn new(x: f32, y: f32) -> Self {
+impl Sqrt for f32 {
+    type Output = f32;
+
+    fn sqrt(self) -> Self::Output {
+        return self.sqrt();
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Vector2<T> {
+    pub x: T,
+    pub y: T,
+}
+
+impl <T> Vector2<T> {
+    pub fn new(x: T, y: T) -> Self {
         return Vector2 {
             x,
             y,
         }
     }
+}
 
-    pub fn addf(&mut self, val: f32) {
+impl <T> Vector2<T>
+    where T: std::ops::AddAssign<T> + Copy {
+
+    pub fn addf(&mut self, val: T) {
         self.x += val;
         self.y += val;
     }
+}
 
-    pub fn divf(&mut self, val: f32) {
+impl <T> Vector2<T>
+    where T: std::ops::DivAssign<T> + Copy {
+
+    pub fn divf(&mut self, val: T) {
         self.x /= val;
         self.y /= val;
     }
+}
 
-    pub fn addv2(&mut self, other: &Vector2) {
+impl <T> Vector2<T>
+    where T: std::ops::AddAssign<T> + Copy {
+
+    pub fn addv2(&mut self, other: &Vector2<T>) {
         self.x += other.x;
         self.y += other.y;
     }
+}
 
-    pub fn subv2(&mut self, other: &Vector2) {
+impl <T> Vector2<T>
+    where T: std::ops::SubAssign<T> + Copy {
+
+    pub fn subv2(&mut self, other: &Vector2<T>) {
         self.x -= other.x;
         self.y -= other.y;
     }
+}
+
+impl <T> Vector2<T>
+    where T: std::ops::Neg<Output = T> + Copy {
 
     pub fn normal(&mut self) {
         let x = self.x;
         self.x = self.y;
         self.y = -x;
     }
+}
 
-    pub fn len(&self) -> f32 {
-        return (self.x.powi(2) + self.y.powi(2)).sqrt();
+impl <T> Vector2<T>
+    where T: std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
+
+    pub fn len_squared(&self) -> T {
+        return self.x * self.x + self.y * self.y;
     }
+}
+
+impl <T> Vector2<T>
+    where T: Sqrt + std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
+
+    pub fn len(&self) -> <T as Sqrt>::Output {
+        return self.len_squared().sqrt();
+    }
+}
+
+impl <T> Vector2<T>
+    where T: Sqrt<Output = T> + std::ops::Mul<Output = T> + std::ops::Add<Output = T> + std::ops::DivAssign<T> + Copy {
 
     pub fn unit(&mut self) {
         let len = self.len();
         self.x /= len;
         self.y /= len;
     }
+}
 
+
+impl Vector2<f32> {
     pub fn apply_transform(&mut self, mat: &[f32; 9]) {
         self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
         self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
     }
 
-    pub fn mulv2(&mut self, other: &Vector2) {
+    pub fn mulv2(&mut self, other: &Self) {
         self.x *= other.x;
         self.y *= other.y;
     }
 }
 
+impl Vector2<f64> {
+    pub fn apply_transform(&mut self, mat: &[f64; 9]) {
+        self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
+        self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
+    }
+
+    pub fn mulv2(&mut self, other: &Self) {
+        self.x *= other.x;
+        self.y *= other.y;
+    }
+}
+
+pub struct Mat4 {
+    pub data: [f64; 16],
+}
+
+const MAT4_IDENTITY: Mat4 = Mat4{ data: [
+           1.0,    0.0,    0.0, 0.0,
+           0.0,    1.0,    0.0, 0.0,
+           0.0,    0.0,    1.0, 0.0,
+           0.0,    0.0,    0.0, 1.0,
+]};
+
+pub struct Mat3 {
+    pub data: [f64; 9],
+}
+
+impl Mat4 {
+    pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Self {
+        return Mat4{
+            data: [
+                2.0/(right-left),              0.0,            0.0, -(right+left)/(right-left),
+                             0.0, 2.0/(top-bottom),            0.0, -(top+bottom)/(top-bottom),
+                             0.0,              0.0, 2.0/(far-near), -(far+near  )/(far-near  ),
+                             0.0,              0.0,            1.0,                          1.0,
+            ]
+        };
+    }
+
+    pub fn scale_2d(x_factor: f64, y_factor: f64) -> Self {
+        return Mat4{ data: [
+              x_factor,        0.0,        0.0, 0.0,
+                   0.0,   y_factor,        0.0, 0.0,
+                   0.0,        0.0,        1.0, 0.0,
+                   0.0,        0.0,        0.0, 1.0,
+        ]};
+    }
+
+    pub fn translate(x: f64, y: f64) -> Self {
+        return Mat4{ data: [
+               1.0,    0.0,    0.0,   x,
+               0.0,    1.0,    0.0,   y,
+               0.0,    0.0,    1.0, 0.0,
+               0.0,    0.0,    0.0, 1.0,
+        ]};
+    }
+
+    pub fn mul(&self, other: &Self) -> Self {
+        let mut out = [0.0; 16];
+
+        for row in 0..4 {
+            let row_offset = row * 4;
+            for column in 0..4 {
+                out[row_offset + column] =
+                    (other.data[row_offset + 0] * self.data[column + 0]) +
+                    (other.data[row_offset + 1] * self.data[column + 4]) +
+                    (other.data[row_offset + 2] * self.data[column + 8]) +
+                    (other.data[row_offset + 3] * self.data[column + 12]);
+            }
+        }
+
+        return Mat4{
+            data: out
+        };
+    }
+}
+
+impl Into<Mat3> for &Mat4 {
+    fn into(self) -> Mat3 {
+        return Mat3{ data: [
+            self.data[0],  self.data[1],  self.data[3],
+            self.data[4],  self.data[5],  self.data[7],
+            self.data[12], self.data[13], self.data[15],
+        ]};
+    }
+}
+
+impl Into<[f32; 16]> for Mat4 {
+    fn into(self) -> [f32; 16] {
+        return [
+            self.data[0] as f32,  self.data[1] as f32,  self.data[2] as f32,  self.data[3] as f32,
+            self.data[4] as f32,  self.data[5] as f32,  self.data[6] as f32,  self.data[7] as f32,
+            self.data[8] as f32,  self.data[9] as f32,  self.data[10] as f32, self.data[11] as f32,
+            self.data[12] as f32, self.data[13] as f32, self.data[14] as f32, self.data[15] as f32,
+        ];
+    }
+}
+
+impl Into<[f32; 16]> for &Mat4 {
+    fn into(self) -> [f32; 16] {
+        return [
+            self.data[0] as f32,  self.data[1] as f32,  self.data[2] as f32,  self.data[3] as f32,
+            self.data[4] as f32,  self.data[5] as f32,  self.data[6] as f32,  self.data[7] as f32,
+            self.data[8] as f32,  self.data[9] as f32,  self.data[10] as f32, self.data[11] as f32,
+            self.data[12] as f32, self.data[13] as f32, self.data[14] as f32, self.data[15] as f32,
+        ];
+    }
+}
+
+impl Into<[f32; 9]> for Mat3 {
+    fn into(self) -> [f32; 9] {
+        return [
+            self.data[0] as f32, self.data[1] as f32, self.data[2] as f32,
+            self.data[3] as f32, self.data[4] as f32, self.data[5] as f32,
+            self.data[6] as f32, self.data[7] as f32, self.data[8] as f32,
+        ];
+    }
+}

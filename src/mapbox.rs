@@ -74,13 +74,6 @@ pub mod pbuf {
         }
     }
 
-    #[derive(PartialEq)]
-    enum State {
-        Field,
-        Tag,
-        Value,
-    }
-
     struct BoundedRead<'a, T: Read> {
         reader : &'a mut T,
         pos: usize,
@@ -269,15 +262,6 @@ pub mod pbuf {
         }
 
         return Ok(value);
-    }
-
-    pub fn read_zig<T: Read>(reader: &mut T) -> Result<i64> {
-        let value = read_var_int(reader)?;
-        // If the bottom bit is set flip will be all 1's, if it's unset it will be all 0's
-        let flip = -((value & 1) as i64) as u64;
-        let signed = ((value >> 1) ^ flip) as i64;
-        dbg!(value);
-        return Ok(signed);
     }
 
     pub fn decode_zig(value: u64) -> i64 {
@@ -801,7 +785,7 @@ pub mod pmtile {
         }
     }
 
-    fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2, v1: Vector2, connect_previous: bool) {
+    fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool) {
         let cx = lv.x;
         let cy = lv.y;
 
@@ -1091,7 +1075,7 @@ pub mod pmtile {
         tile_compression: Compression,
 
         min_zoom: u8,
-        max_zoom: u8,
+        pub max_zoom: u8,
 
         fdir: Option<NonNull<Directory>>,
         ldir: Option<NonNull<Directory>>,
@@ -1228,11 +1212,10 @@ pub mod pmtile {
     }
 
     pub struct LiveTiles {
-        source: File,
+        pub source: File,
 
-        // @CLEANUP: Get rid of this Rc somehow
-        active: HashMap<u64, std::rc::Rc<Tile>>,
-        pub visible: Vec<std::rc::Rc<Tile>>,
+        pub active: HashMap<u64, Tile>,
+        pub visible: Vec<u64>,
     }
 
     impl LiveTiles {
@@ -1247,15 +1230,13 @@ pub mod pmtile {
         pub fn retrieve_visible_tiles(&mut self, left: u64, top: u64, right: u64, bottom: u64, level: u8) {
             let mut keys: HashSet<u64> = self.active.keys().cloned().collect();
 
-            self.visible = vec![];
-
             for x in left.max(0)..right.max(0) {
                 for y in top.max(0)..bottom.max(0) {
                     let id = coords_to_id(x, y, level);
                     keys.remove(&id);
                     if !self.active.contains_key(&id) {
                         if let Some(ptile) = self.source.load_tile(x, y, level) {
-                            self.active.insert(id, std::rc::Rc::new(ptile));
+                            self.active.insert(id, ptile);
                         }
                     }
 
@@ -1266,11 +1247,12 @@ pub mod pmtile {
                 self.active.remove(&k);
             }
 
+            self.visible.clear();
             for x in left.max(0)..right.max(0) {
                 for y in top.max(0)..bottom.max(0) {
                     let id = coords_to_id(x, y, level);
                     if self.active.contains_key(&id) {
-                        self.visible.push(self.active.get(&id).unwrap().clone());
+                        self.visible.push(id);
                     }
                 }
             }

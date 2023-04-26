@@ -6,6 +6,8 @@ extern crate freetype;
 
 use triangulate::triangulate;
 use math::Vector2;
+use math::Mat4;
+use math::Mat3;
 use std::convert::TryInto;
 use std::ffi::CString;
 
@@ -79,71 +81,6 @@ fn compile_shader(vert: &str, frag: &str) -> u32 {
     return program;
 }
 
-type Mat4 = [f32; 16];
-
-fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
-    return [
-        2.0/(right-left),              0.0,            0.0, -(right+left)/(right-left),
-                     0.0, 2.0/(top-bottom),            0.0, -(top+bottom)/(top-bottom),
-                     0.0,              0.0, 2.0/(far-near), -(far+near  )/(far-near  ),
-                     0.0,              0.0,            1.0,                          1.0,
-    ];
-}
-
-fn mat4_multply(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-    let mut out = [0.0; 16];
-
-    for row in 0..4 {
-        let row_offset = row * 4;
-        for column in 0..4 {
-            out[row_offset + column] =
-                (b[row_offset + 0] * a[column + 0]) +
-                (b[row_offset + 1] * a[column + 4]) +
-                (b[row_offset + 2] * a[column + 8]) +
-                (b[row_offset + 3] * a[column + 12]);
-        }
-    }
-
-    return out;
-}
-
-fn mat4_scale_2d(x_factor: f32, y_factor: f32) -> [f32; 16] {
-    return [
-          x_factor,        0.0,        0.0, 0.0,
-               0.0,   y_factor,        0.0, 0.0,
-               0.0,        0.0,        1.0, 0.0,
-               0.0,        0.0,        0.0, 1.0,
-    ];
-}
-
-fn mat4_scale(factor: f32) -> [f32; 16] {
-    return mat4_scale_2d(factor, factor);
-}
-
-fn mat4_translate(x: f32, y: f32) -> [f32; 16] {
-    return [
-           1.0,    0.0,    0.0,   x,
-           0.0,    1.0,    0.0,   y,
-           0.0,    0.0,    1.0, 0.0,
-           0.0,    0.0,    0.0, 1.0,
-    ];
-}
-
-fn mat4_to_mat3(mat: &[f32; 16]) -> [f32; 9] {
-    return [
-        mat[0], mat[1], mat[3],
-        mat[4], mat[5], mat[7],
-        mat[12], mat[13], mat[15],
-    ]
-}
-
-const IDENTITY: [f32; 16] = [
-           1.0,    0.0,    0.0, 0.0,
-           0.0,    1.0,    0.0, 0.0,
-           0.0,    0.0,    1.0, 0.0,
-           0.0,    0.0,    0.0, 1.0,
-];
-
 pub struct LineProg {
     program: u32,
     transform: i32,
@@ -152,8 +89,8 @@ pub struct LineProg {
 }
 
 struct Character {
-    size: Vector2,
-    bearing: Vector2,
+    size: Vector2<f32>,
+    bearing: Vector2<f32>,
     advance: f32,
     texture: u32,
 }
@@ -313,7 +250,7 @@ fn load_font() -> FontMap {
     };
 }
 
-fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2) {
+fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8], pos: &Vector2<f32>) {
     unsafe {
         gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
         gl::Enable(gl::BLEND);
@@ -331,11 +268,12 @@ fn draw_ascii(projection: &[f32;16], font: &FontMap, text: &[u8], pos: &Vector2)
         let mut pos = pen;
         pos.addv2(&char.bearing);
 
-        let mvp = mat4_multply(&mat4_multply(&mat4_scale_2d(char.size.x, char.size.y), &mat4_translate(pos.x, pos.y)), projection);
+        let mvp = Mat4::scale_2d(char.size.x as f64, char.size.y as f64).mul(&Mat4::translate(pos.x as f64, pos.y as f64).mul(projection));
+        let mvp32: [f32; 16] = mvp.into();
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, char.texture);
-            gl::UniformMatrix4fv(font.uni_transform, 1, gl::TRUE, mvp.as_ptr());
+            gl::UniformMatrix4fv(font.uni_transform, 1, gl::TRUE, mvp32.as_ptr());
             gl::BindVertexArray(font.vao);
             gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
         }
@@ -426,7 +364,7 @@ fn main() {
 
         uniform vec4 fill_color;
 
-        const float feather = 1.5;
+        const float feather = .7;
         const float line_width = 0.7;
         const float line_smooth = .5;
         const vec4 edge_color = vec4(0, 0, 0, 1);
@@ -459,9 +397,9 @@ fn main() {
             float invdist = 1-dist;
             float grad = fwidth(invdist);
             float ffactor = clamp(invdist/(feather*grad), 0, 1);
-            // color *= ffactor;
+            color *= ffactor;
 
-            color = mix(edge_color, color, edge_factor());
+            // color = mix(edge_color, color, edge_factor());
             // color = vec4(.9, .9, .9, 1.0);
         }
     ";
@@ -540,11 +478,11 @@ fn main() {
 
     // -------------------------------------------
 
-    let mut projection = ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
-    let mut hold: Option<Vector2> = None;
+    let mut projection = Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
+    let mut hold: Option<Vector2<f64>> = None;
     let mut zoom = 0.0;
     let mut scale = 1.0;
-    let mut viewport_pos = Vector2::new(0.0, 0.0);
+    let mut viewport_pos = Vector2::new(0.0_f64, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
     let mut tiles = mapbox::pmtile::LiveTiles::new(mapbox::pmtile::File::new("aalborg.pmtiles"));
@@ -564,27 +502,27 @@ fn main() {
 
             scale = f32::powf(2.0, zoom);
 
-            viewport_pos.x += display.mouse_x as f32 / scale * dzoom;
-            viewport_pos.y += display.mouse_y as f32 / scale * dzoom;
+            // viewport_pos.x += display.mouse_x as f64 / (scale * dzoom) as f64;
+            // viewport_pos.y += display.mouse_y as f64 / (scale * dzoom) as f64;
         }
 
-        let scale_level = f32::log2(scale).floor() as u64;
+        let scale_level = (f32::log2(scale).floor() as u64).min(tiles.source.max_zoom as u64);
 
         {
             // Calculate the mouse position in the world
-            mouse_world.x = display.mouse_x as f32;
-            mouse_world.y = display.mouse_y as f32;
-            mouse_world.divf(scale);
+            mouse_world.x = display.mouse_x as f64;
+            mouse_world.y = display.mouse_y as f64;
+            mouse_world.divf(scale as f64);
             mouse_world.addv2(&viewport_pos);
         }
 
         if display.size_change {
-            projection = ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
+            projection = Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
         }
 
         if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
             if let Some(hold) = hold {
-                let mut diff = hold;
+                let mut diff = hold.clone();
                 diff.subv2(&mouse_world);
                 viewport_pos.addv2(&diff);
                 mouse_world = hold;
@@ -596,17 +534,17 @@ fn main() {
         }
 
         {
-            let native_resolution = MAP_SIZE as f32 / 2.0_f32.powi(scale_level as i32);
+            let native_resolution = MAP_SIZE as f64 / 2.0_f64.powi(scale_level as i32);
             let left = ((viewport_pos.x / native_resolution).floor() as i64).max(0) as u64;
             let top = ((viewport_pos.y / native_resolution).floor() as i64).max(0) as u64;
-            let right = (((viewport_pos.x + (display.width as f32/scale)) / native_resolution).ceil() as i64).max(0) as u64;
-            let bottom = (((viewport_pos.y + (display.height as f32/scale)) / native_resolution).ceil() as i64).max(0) as u64;
+            let right = (((viewport_pos.x + (display.width as f64/scale as f64)) / native_resolution).ceil() as i64).max(0) as u64;
+            let bottom = (((viewport_pos.y + (display.height as f64/scale as f64)) / native_resolution).ceil() as i64).max(0) as u64;
 
             tiles.retrieve_visible_tiles(left, top, right, bottom, scale_level as u8);
         }
 
 
-        let camera_matrix = mat4_multply(&mat4_translate(-viewport_pos.x, -viewport_pos.y), &mat4_scale(scale));
+        let camera_matrix = Mat4::translate(-viewport_pos.x, -viewport_pos.y).mul(&Mat4::scale_2d(scale as f64, scale as f64));
 
         clear_color(Color(0.3, 0.4, 0.6, 1.0));
 
@@ -621,21 +559,23 @@ fn main() {
             gl::UseProgram(shader_program.program);
         }
 
-        let vp = mat4_multply(&camera_matrix, &projection);
-        for tile in &tiles.visible {
+        let vp = camera_matrix.mul(&projection);
+        for tid in &tiles.visible {
+            let tile = tiles.active.get(tid).unwrap();
 
-            let grid_step = MAP_SIZE as f32 / 2.0_f32.powi(tile.z as i32);
+            let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
             // Transform the tilelocal coordinates to global coordinates
             let tile_transform;
             let tile_move;
             {
-                let xcoord = tile.x as f32 * grid_step;
-                let ycoord = tile.y as f32 * grid_step;
-                tile_move = mat4_translate(xcoord, ycoord);
-                let tile_matrix = mat4_multply(&mat4_scale(grid_step / tile.extent as f32), &tile_move);
-                tile_transform = mat4_multply(&tile_matrix, &vp);
+                let xcoord = tile.x as f64 * grid_step;
+                let ycoord = tile.y as f64 * grid_step;
+                tile_move = Mat4::translate(xcoord, ycoord);
+                let tile_matrix = &Mat4::scale_2d(grid_step / tile.extent as f64, grid_step / tile.extent as f64).mul(&tile_move);
+                tile_transform = tile_matrix.mul(&vp);
             }
+            // Here we can truncate
 
 
             // Calculate the screen position of the tile and scissor that
@@ -644,9 +584,10 @@ fn main() {
                 let mut v2 = Vector2::new(tile.extent as f32, 0.0);
 
                 // The clipspace transform
-                let mvp2d = mat4_to_mat3(&tile_transform);
-                v1.apply_transform(&mvp2d);
-                v2.apply_transform(&mvp2d);
+                let mvp2d: Mat3 = (&tile_transform).into();
+                let mvp2d32: [f32; 9] = mvp2d.into();
+                v1.apply_transform(&mvp2d32);
+                v2.apply_transform(&mvp2d32);
 
                 // The viewport transform
                 v1.addf(1.0);
@@ -670,10 +611,11 @@ fn main() {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
+            let tile_transform32: [f32; 16] = (&tile_transform).into();
             unsafe {
                 gl::UseProgram(shader_program.program);
 
-                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform.as_ptr());
+                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
                 gl::BindVertexArray(tile.vao);
 
                 let power = 2.0_f32.powi(scale_level as i32);
@@ -688,26 +630,28 @@ fn main() {
                 gl::Disable(gl::SCISSOR_TEST);
             }
 
-            unsafe {
-                gl::UseProgram(shader_program.program);
+            // unsafe {
+            //     gl::UseProgram(shader_program.program);
 
-                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform.as_ptr());
-                gl::BindVertexArray(border.vao);
+            //     gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+            //     gl::BindVertexArray(border.vao);
 
-                gl::Uniform1f(shader_program.width, 10.0);
-                gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
-                gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
+            //     gl::Uniform1f(shader_program.width, 10.0);
+            //     gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
+            //     gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
 
-                gl::BindVertexArray(0);
-            }
+            //     gl::BindVertexArray(0);
+            // }
 
             {
-                let text_transform = mat4_multply(&mat4_scale(8.0), &tile_transform);
+                let text_transform = Mat4::scale_2d(8.0, 8.0).mul(&tile_transform);
                 draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
                 draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
             }
         }
 
+        // draw_ascii(&projection, &font, format!("Pos {} {}", viewport_pos.x, viewport_pos.y).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 100.0));
         // draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
