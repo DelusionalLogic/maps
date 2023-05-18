@@ -516,7 +516,6 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
     while let Ok(field) = reader.next() {
         match field {
             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 3} => {
-                println!("Layer!");
                 let mut seen_name = false;
                 reader.enter_message()?;
                 'layer: while let Ok(field) = reader.next() {
@@ -528,6 +527,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                         }
                         pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
                             let name = reader.read_string()?;
+                            println!("Layer named {}", name);
                             if name != "roads" {
                                 reader.exit_message()?;
                                 break 'layer;
@@ -550,10 +550,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                         seen_type = true;
                                     },
                                     pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
-                                        if !seen_type {
-                                            reader.exit_message()?;
-                                            break 'feature;
-                                        }
+                                        assert!(seen_type);
 
                                         let mut cx = 0.0;
                                         let mut cy = 0.0;

@@ -500,13 +500,15 @@ fn main() {
             zoom += dzoom;
             zoom = zoom.clamp(0.0, 100.0);
 
-            scale = f32::powf(2.0, zoom);
+            let old_scale = scale;
+            scale = f64::powf(2.0, zoom.into());
 
-            // viewport_pos.x += display.mouse_x as f64 / (scale * dzoom) as f64;
-            // viewport_pos.y += display.mouse_y as f64 / (scale * dzoom) as f64;
+            let v = (scale-old_scale) / (scale*old_scale);
+            viewport_pos.x += display.mouse_x * v;
+            viewport_pos.y += display.mouse_y * v;
         }
 
-        let scale_level = (f32::log2(scale).floor() as u64).min(tiles.source.max_zoom as u64);
+        let scale_level = (f64::log2(scale).floor() as u64).min(tiles.source.max_zoom as u64);
 
         {
             // Calculate the mouse position in the world
@@ -618,7 +620,6 @@ fn main() {
                 gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
                 gl::BindVertexArray(tile.vao);
 
-                let power = 2.0_f32.powi(scale_level as i32);
                 gl::Uniform1f(shader_program.width, 12.0);
                 gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
                 gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
@@ -650,8 +651,8 @@ fn main() {
             }
         }
 
-        // draw_ascii(&projection, &font, format!("Pos {} {}", viewport_pos.x, viewport_pos.y).as_bytes(), &Vector2::new(100.0, 100.0));
-        draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
         // draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
