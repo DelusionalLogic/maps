@@ -508,9 +508,10 @@ pub struct LineStart {
     pos: usize,
 }
 
-pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<(Vec<LineStart>, Vec<LineVert>)> {
+pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<(Vec<LineStart>, Vec<LineVert>, Vec<LineVert>)> {
     let mut start = vec![];
     let mut vert : Vec<LineVert> = vec![];
+    let mut polys : Vec<LineVert> = vec![];
 
     println!("Reading!");
     while let Ok(field) = reader.next() {
@@ -526,9 +527,10 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                             assert_eq!(version, 2);
                         }
                         pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
+                            assert!(!seen_name);
                             let name = reader.read_string()?;
                             println!("Layer named {}", name);
-                            if name != "roads" {
+                            if name != "roads" && name != "earth" {
                                 reader.exit_message()?;
                                 break 'layer;
                             }
@@ -538,87 +540,54 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                         pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
                             assert!(seen_name);
                             reader.enter_message()?;
-                            let mut seen_type = false;
+                            let mut seen_type = None;
                             'feature: while let Ok(field) = reader.next() {
                                 match field {
                                     pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
-                                        if reader.read_var_int()? != 2 {
-                                            reader.exit_message()?;
-                                            break 'feature;
-                                        }
+                                        let geo_type = reader.read_var_int()?;
+                                        // if  geo_type != 2 {
+                                        //     reader.exit_message()?;
+                                        //     break 'feature;
+                                        // }
 
-                                        seen_type = true;
+                                        seen_type = Some(geo_type);
                                     },
                                     pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
-                                        assert!(seen_type);
+                                        assert!(seen_type.is_some());
 
-                                        let mut cx = 0.0;
-                                        let mut cy = 0.0;
-                                        let mut it = reader.read_packed_var_int()?;
-                                        while let Some(cmd) = it.next() {
-                                            let cmd = cmd?;
-                                            if (cmd & 7) == 1 { // MoveTo
-                                                let x = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                cx += x as f32;
-                                                let y = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                cy += y as f32;
+                                        if seen_type.unwrap() == 2 {
+                                            let mut cx = 0.0;
+                                            let mut cy = 0.0;
+                                            let mut it = reader.read_packed_var_int()?;
+                                            while let Some(cmd) = it.next() {
+                                                let cmd = cmd?;
+                                                if (cmd & 7) == 1 { // MoveTo
+                                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                                    cx += x as f32;
+                                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                                    cy += y as f32;
 
-                                                start.push(LineStart{pos: vert.len()});
-                                                // Don't push any verts until the line is drawn
-                                            } else if (cmd & 7) == 2 { // LineTo
-                                                for i in 0..(cmd >> 3) {
-                                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                    let px = cx + x;
-                                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                    let py = cy + y;
+                                                    start.push(LineStart{pos: vert.len()});
+                                                    // Don't push any verts until the line is drawn
+                                                } else if (cmd & 7) == 2 { // LineTo
+                                                    for i in 0..(cmd >> 3) {
+                                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                                        let px = cx + x;
+                                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                                        let py = cy + y;
 
-                                                    let mut normal = Vector::new(y, -(x));
-                                                    normal.unit();
+                                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0);
 
-                                                    let bend_norm_x;
-                                                    let bend_norm_y;
-                                                    if i != 0 {
-                                                        let len = vert.len();
-
-                                                        let last_normx = vert[len-2].norm_x;
-                                                        let last_normy = vert[len-2].norm_y;
-
-                                                        let mut join_x = last_normx + normal.x;
-                                                        let mut join_y = last_normy + normal.y;
-                                                        let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
-                                                        join_x /= join_len;
-                                                        join_y /= join_len;
-
-                                                        let cos_angle = normal.x * join_x + normal.y * join_y;
-                                                        let l = 1.0 / cos_angle;
-
-                                                        bend_norm_x = join_x * l;
-                                                        bend_norm_y = join_y * l;
-
-                                                        vert[len-2].norm_x = bend_norm_x;
-                                                        vert[len-2].norm_y = bend_norm_y;
-                                                        vert[len-3].norm_x = -bend_norm_x;
-                                                        vert[len-3].norm_y = -bend_norm_y;
-                                                        vert[len-4].norm_x = bend_norm_x;
-                                                        vert[len-4].norm_y = bend_norm_y;
-                                                    } else {
-                                                        bend_norm_x = normal.x;
-                                                        bend_norm_y = normal.y;
+                                                        cx = px;
+                                                        cy = py;
                                                     }
-
-                                                    // Now construct the tris
-                                                    vert.push(LineVert { x: cx, y: cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
-                                                    vert.push(LineVert { x: cx, y: cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
-                                                    vert.push(LineVert { x: px, y: py, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
-
-                                                    vert.push(LineVert { x: px, y: py, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
-                                                    vert.push(LineVert { x: px, y: py, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
-                                                    vert.push(LineVert { x: cx, y: cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
-
-                                                    cx = px;
-                                                    cy = py;
+                                                } else if (cmd & 7) == 7 { // ClosePath
+                                                    // Do nothing, the path is assumed closed
                                                 }
                                             }
+                                        } else if seen_type.unwrap() == 3 {
+                                            println!("POLY");
+                                            reader.skip(pbuf::WireType::Len)?;
                                         }
                                     }
                                     pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
@@ -634,7 +603,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
         }
     }
 
-    return Ok((start, vert));
+    return Ok((start, vert, polys));
 }
 
 pub mod pmtile {
@@ -782,7 +751,7 @@ pub mod pmtile {
         }
     }
 
-    fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool) {
+    pub fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool) {
         let cx = lv.x;
         let cy = lv.y;
 
@@ -836,7 +805,7 @@ pub mod pmtile {
     }
 
     fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
-        let (start, verts) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
+        let (start, verts, polys) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
         let mut vao = 0;
         unsafe { gl::GenVertexArrays(1, &mut vao) };
