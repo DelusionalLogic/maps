@@ -1,13 +1,13 @@
 mod triangulate;
 mod math;
 mod mapbox;
-
 extern crate freetype;
 
 use triangulate::triangulate;
 use math::Vector2;
 use math::Mat4;
 use math::Mat3;
+
 use std::convert::TryInto;
 use std::ffi::CString;
 
@@ -382,22 +382,23 @@ fn main() {
         }
 
         void main() {
+            color = vec4(1.0);
             float dist = abs(v_dist);
 
-            float border = 2/tesselation_width;
 
             color = fill_color;
 
 
             { // Border
+                // float border = 2/tesselation_width;
                 // float ffactor = linearstep(1-border-feather, 1-border, dist);
                 // color = mix(color, border_color, ffactor);
             }
 
-            float invdist = 1-dist;
-            float grad = fwidth(invdist);
-            float ffactor = clamp(invdist/(feather*grad), 0, 1);
-            color *= ffactor;
+            // float invdist = 1-dist;
+            // float grad = fwidth(invdist);
+            // float ffactor = clamp(invdist/(feather*grad), 0, 1);
+            // color *= ffactor;
 
             // color = mix(edge_color, color, edge_factor());
             // color = vec4(.9, .9, .9, 1.0);
@@ -614,6 +615,22 @@ fn main() {
             }
 
             let tile_transform32: [f32; 16] = (&tile_transform).into();
+
+            if tile.poly_len > 0 {
+                unsafe {
+                    gl::UseProgram(shader_program.program);
+
+                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                    gl::BindVertexArray(tile.poly_vao);
+
+                    gl::Uniform1f(shader_program.width, 12.0);
+                    gl::Uniform4f(shader_program.fill_color, 0.0, 0.0, 1.0, 1.0);
+                    gl::DrawArrays(gl::TRIANGLES, 0, tile.poly_len as _);
+
+                    gl::BindVertexArray(0);
+                }
+            }
+
             unsafe {
                 gl::UseProgram(shader_program.program);
 
@@ -631,28 +648,28 @@ fn main() {
                 gl::Disable(gl::SCISSOR_TEST);
             }
 
-            // unsafe {
-            //     gl::UseProgram(shader_program.program);
+            unsafe {
+                gl::UseProgram(shader_program.program);
 
-            //     gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-            //     gl::BindVertexArray(border.vao);
+                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                gl::BindVertexArray(border.vao);
 
-            //     gl::Uniform1f(shader_program.width, 10.0);
-            //     gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
-            //     gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
+                gl::Uniform1f(shader_program.width, 10.0);
+                gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
+                gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
 
-            //     gl::BindVertexArray(0);
-            // }
+                gl::BindVertexArray(0);
+            }
 
             {
                 let text_transform = Mat4::scale_2d(8.0, 8.0).mul(&tile_transform);
-                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
-                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
+                // draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
+                // draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
             }
         }
 
-        draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
-        draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
+        // draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
+        // draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
         // draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();

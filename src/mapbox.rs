@@ -503,6 +503,11 @@ pub struct LineVert {
     pub sign: i8,
 }
 
+pub struct Normal {
+    pub x: f32,
+    pub y: f32,
+}
+
 #[derive(Debug)]
 pub struct LineStart {
     pos: usize,
@@ -576,18 +581,52 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                                         let py = cy + y;
 
-                                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0);
+                                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+
+                                                        cx = px;
+                                                        cy = py;
+                                                    }
+                                                } else {
+                                                    panic!("Unknown command");
+                                                }
+                                            }
+                                        } else if seen_type.unwrap() == 3 {
+                                            println!("POLY");
+                                            let mut cx = 0.0;
+                                            let mut cy = 0.0;
+                                            let mut end = false;
+                                            let mut it = reader.read_packed_var_int()?;
+                                            while let Some(cmd) = it.next() {
+                                                if end { continue; }
+                                                let cmd = cmd?;
+                                                if (cmd & 7) == 1 { // MoveTo
+                                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                                    cx += x as f32;
+                                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                                    cy += y as f32;
+
+                                                    // start.push(LineStart{pos: vert.len()});
+                                                    // Don't push any verts until the line is drawn
+                                                } else if (cmd & 7) == 2 { // LineTo
+                                                    for _ in 0..(cmd >> 3) {
+                                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                                        let px = cx + x;
+                                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                                        let py = cy + y;
+
+                                                        polys.push(LineVert { x:   px, y:   py, norm_x:  0.0, norm_y:  0.0, sign: 1 });
 
                                                         cx = px;
                                                         cy = py;
                                                     }
                                                 } else if (cmd & 7) == 7 { // ClosePath
-                                                    // Do nothing, the path is assumed closed
+                                                    // Adjust normals
+                                                    // pmtile::add_point(&mut polys, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: sx, y: sy }, true, true);
+                                                    end = true;
+                                                } else {
+                                                    panic!("Unknown command");
                                                 }
                                             }
-                                        } else if seen_type.unwrap() == 3 {
-                                            println!("POLY");
-                                            reader.skip(pbuf::WireType::Len)?;
                                         }
                                     }
                                     pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
@@ -740,6 +779,9 @@ pub mod pmtile {
         pub vao: u32,
         pub vbo: u32,
         pub vertex_len: usize,
+        pub poly_vao: u32,
+        pub poly_vbo: u32,
+        pub poly_len: usize,
     }
 
     impl Drop for Tile {
@@ -747,11 +789,13 @@ pub mod pmtile {
             unsafe {
                 gl::DeleteVertexArrays(1, &self.vao);
                 gl::DeleteBuffers(1, &self.vbo);
+                gl::DeleteVertexArrays(1, &self.poly_vao);
+                gl::DeleteBuffers(1, &self.poly_vbo);
             }
         }
     }
 
-    pub fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool) {
+    pub fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool, add_point: bool) {
         let cx = lv.x;
         let cy = lv.y;
 
@@ -794,14 +838,16 @@ pub mod pmtile {
             bend_norm_y = normal.y;
         }
 
-        // Now construct the tris
-        verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
-        verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
-        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+        if add_point {
+            // Now construct the tris
+            verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+            verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
 
-        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
-        verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
-        verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+            verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+        }
     }
 
     fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
@@ -830,6 +876,67 @@ pub mod pmtile {
             gl::BindVertexArray(0);
         }
 
+        let poly_vao;
+        let poly_vbo;
+        let poly_len;
+        {
+            // Triangulate poly
+            use crate::triangulate;
+
+            let xs = polys.iter().rev().map(|x| x.x as f64).collect::<Vec<f64>>();
+            let ys = polys.iter().rev().map(|x| x.y as f64).collect::<Vec<f64>>();
+
+            println!("Begin triangulation");
+            let triangulation = triangulate::triangulate(&xs, &ys).trim();
+            println!("End triangulation");
+            let mut tri_polys : Vec<super::LineVert> = vec![];
+
+            for tri in &triangulation.tris {
+                let p1 = triangulation.verts[tri[0]];
+                let p2 = triangulation.verts[tri[1]];
+                let p3 = triangulation.verts[tri[2]];
+
+                // if triangulation.is_fixed(tri[0], tri[1]) {
+                    // add_point(&mut tri_polys, Vector2 { x: p1.x as _, y: p1.y as _ },  Vector2 { x: p2.x as _, y: p2.y as _ }, false, true);
+                // // }
+                // // if triangulation.is_fixed(tri[1], tri[2]) {
+                    // add_point(&mut tri_polys, Vector2 { x: p2.x as _, y: p2.y as _ },  Vector2 { x: p3.x as _, y: p3.y as _ }, false, true);
+                // // }
+                // // if triangulation.is_fixed(tri[2], tri[0]) {
+                    // add_point(&mut tri_polys, Vector2 { x: p3.x as _, y: p3.y as _ },  Vector2 { x: p1.x as _, y: p1.y as _ }, false, true);
+                // }
+                tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+            }
+
+            let mut vao = 0;
+            unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+            let mut vbo = 0;
+            unsafe { gl::GenBuffers(1, &mut vbo) };
+
+            unsafe {
+                gl::BindVertexArray(vao);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+                gl::BufferData(gl::ARRAY_BUFFER, (tri_polys.len() * std::mem::size_of::<super::LineVert>()) as _, tri_polys.as_ptr().cast(), gl::STATIC_DRAW);
+
+                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+                gl::EnableVertexAttribArray(0);
+                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(1);
+                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(2);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+                gl::BindVertexArray(0);
+            }
+            poly_vao = vao;
+            poly_vbo = vbo;
+            poly_len = tri_polys.len();
+        }
+
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
         return Ok(Tile{
@@ -841,6 +948,9 @@ pub mod pmtile {
             vao,
             vbo,
             vertex_len: verts.len(),
+            poly_vao,
+            poly_vbo,
+            poly_len,
         });
     }
 
@@ -852,25 +962,25 @@ pub mod pmtile {
 
         {
             let nv = Vector2::new(0.0, 4096.0);
-            add_point(&mut verts, lv, nv, false);
+            add_point(&mut verts, lv, nv, false, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(4096.0, 4096.0);
-            add_point(&mut verts, lv, nv, true);
+            add_point(&mut verts, lv, nv, true, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(4096.0, 0.0);
-            add_point(&mut verts, lv, nv, true);
+            add_point(&mut verts, lv, nv, true, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(0.0, 0.0);
-            add_point(&mut verts, lv, nv, true);
+            add_point(&mut verts, lv, nv, true, true);
         }
 
         let mut vao = 0;
@@ -906,6 +1016,9 @@ pub mod pmtile {
             vao,
             vbo,
             vertex_len: verts.len(),
+            poly_vao: 0,
+            poly_vbo: 0,
+            poly_len: 0,
         };
     }
 
