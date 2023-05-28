@@ -648,18 +648,18 @@ fn main() {
                 gl::Disable(gl::SCISSOR_TEST);
             }
 
-            unsafe {
-                gl::UseProgram(shader_program.program);
+            // unsafe {
+            //     gl::UseProgram(shader_program.program);
 
-                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                gl::BindVertexArray(border.vao);
+            //     gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+            //     gl::BindVertexArray(border.vao);
 
-                gl::Uniform1f(shader_program.width, 10.0);
-                gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
-                gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
+            //     gl::Uniform1f(shader_program.width, 10.0);
+            //     gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
+            //     gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
 
-                gl::BindVertexArray(0);
-            }
+            //     gl::BindVertexArray(0);
+            // }
 
             {
                 let text_transform = Mat4::scale_2d(8.0, 8.0).mul(&tile_transform);

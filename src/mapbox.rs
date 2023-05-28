@@ -493,7 +493,7 @@ impl Vector {
     }
 }
 
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone,Copy,Debug )]
 #[repr(packed)]
 pub struct LineVert {
     pub x: f32,
@@ -513,9 +513,10 @@ pub struct LineStart {
     pos: usize,
 }
 
-pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<(Vec<LineStart>, Vec<LineVert>, Vec<LineVert>)> {
+pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<(Vec<LineStart>, Vec<LineVert>, Vec<LineStart>, Vec<LineVert>)> {
     let mut start = vec![];
     let mut vert : Vec<LineVert> = vec![];
+    let mut poly_start : Vec<LineStart> = vec![];
     let mut polys : Vec<LineVert> = vec![];
 
     println!("Reading!");
@@ -594,10 +595,8 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                             println!("POLY");
                                             let mut cx = 0.0;
                                             let mut cy = 0.0;
-                                            let mut end = false;
                                             let mut it = reader.read_packed_var_int()?;
                                             while let Some(cmd) = it.next() {
-                                                if end { continue; }
                                                 let cmd = cmd?;
                                                 if (cmd & 7) == 1 { // MoveTo
                                                     let x = pbuf::decode_zig(it.next().unwrap().unwrap());
@@ -605,7 +604,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                                     let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                                     cy += y as f32;
 
-                                                    // start.push(LineStart{pos: vert.len()});
+                                                    poly_start.push(LineStart{pos: polys.len()});
                                                     // Don't push any verts until the line is drawn
                                                 } else if (cmd & 7) == 2 { // LineTo
                                                     for _ in 0..(cmd >> 3) {
@@ -620,9 +619,6 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                                         cy = py;
                                                     }
                                                 } else if (cmd & 7) == 7 { // ClosePath
-                                                    // Adjust normals
-                                                    // pmtile::add_point(&mut polys, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: sx, y: sy }, true, true);
-                                                    end = true;
                                                 } else {
                                                     panic!("Unknown command");
                                                 }
@@ -642,7 +638,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
         }
     }
 
-    return Ok((start, vert, polys));
+    return Ok((start, vert, poly_start, polys));
 }
 
 pub mod pmtile {
@@ -851,7 +847,7 @@ pub mod pmtile {
     }
 
     fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
-        let (start, verts, polys) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
+        let (start, verts, poly_start, polys) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
         let mut vao = 0;
         unsafe { gl::GenVertexArrays(1, &mut vao) };
@@ -883,31 +879,81 @@ pub mod pmtile {
             // Triangulate poly
             use crate::triangulate;
 
-            let xs = polys.iter().rev().map(|x| x.x as f64).collect::<Vec<f64>>();
-            let ys = polys.iter().rev().map(|x| x.y as f64).collect::<Vec<f64>>();
+            let mut multipoly_start = Vec::with_capacity(poly_start.len());
+            // Find the clockwise polygons
+            {
+                multipoly_start.push(0);
+                for i in 1..poly_start.len() {
+                    let start = poly_start[i].pos;
+                    let end = if i < poly_start.len()-1 {
+                        poly_start[i+1].pos
+                    } else {
+                        polys.len()
+                    };
 
-            println!("Begin triangulation");
-            let triangulation = triangulate::triangulate(&xs, &ys).trim();
-            println!("End triangulation");
+                    let mut area = 0.0;
+                    for j in start..end-1 {
+                        area += polys[j].x*polys[j+1].y - polys[j].y*polys[j+1].x;
+                    }
+                    area += polys[end-1].x*polys[start].y - polys[end-1].y*polys[start].x;
+
+                    if area.is_sign_positive() {
+                        multipoly_start.push(i);
+                    }
+                }
+            }
+            dbg!(&poly_start, &multipoly_start);
+
             let mut tri_polys : Vec<super::LineVert> = vec![];
+            assert!(poly_start.len() > 0);
+            for i in 0..multipoly_start.len() {
+                let multipoly = multipoly_start[i];
+                let polys_start = poly_start[multipoly].pos;
 
-            for tri in &triangulation.tris {
-                let p1 = triangulation.verts[tri[0]];
-                let p2 = triangulation.verts[tri[1]];
-                let p3 = triangulation.verts[tri[2]];
+                let polys_end = if i == multipoly_start.len()-1 {
+                    // The final multipoly extends to the end of the polys array
+                    polys.len()
+                } else {
+                    poly_start[multipoly_start[i+1]].pos
+                };
 
-                // if triangulation.is_fixed(tri[0], tri[1]) {
-                    // add_point(&mut tri_polys, Vector2 { x: p1.x as _, y: p1.y as _ },  Vector2 { x: p2.x as _, y: p2.y as _ }, false, true);
-                // // }
-                // // if triangulation.is_fixed(tri[1], tri[2]) {
-                    // add_point(&mut tri_polys, Vector2 { x: p2.x as _, y: p2.y as _ },  Vector2 { x: p3.x as _, y: p3.y as _ }, false, true);
-                // // }
-                // // if triangulation.is_fixed(tri[2], tri[0]) {
-                    // add_point(&mut tri_polys, Vector2 { x: p3.x as _, y: p3.y as _ },  Vector2 { x: p1.x as _, y: p1.y as _ }, false, true);
-                // }
-                tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
-                tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
-                tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                // The external polygons is clockwise, we need to reverse it. To do so we wan't to
+                // find the end index of its vertecies.
+                let polys_extern_end = if poly_start.len() > multipoly+1 {
+                    poly_start[multipoly+1].pos
+                } else {
+                    polys.len()
+                };
+
+                dbg!(polys_end, polys.len(), multipoly_start.len());
+
+                let point_it = polys[polys_start..polys_extern_end].iter().rev()
+                    // .chain(polys[polys_extern_end..polys_end].iter())
+                    .map(|i| (i.x as f64, i.y as f64));
+
+                println!("Begin triangulation");
+                let triangulation = triangulate::triangulate_multi(poly_start.iter().map(|x| x.pos), point_it, polys.len())
+                    .trim();
+                println!("End triangulation");
+
+                for tri in &triangulation.tris {
+                    let p1 = triangulation.verts[tri[0]];
+                    let p2 = triangulation.verts[tri[1]];
+                    let p3 = triangulation.verts[tri[2]];
+
+                    // if triangulation.is_fixed(tri[0], tri[1]) {
+                        // add_point(&mut tri_polys, Vector2 { x: p1.x as _, y: p1.y as _ },  Vector2 { x: p2.x as _, y: p2.y as _ }, false, true);
+                    // }
+                    // if triangulation.is_fixed(tri[1], tri[2]) {
+                        // add_point(&mut tri_polys, Vector2 { x: p2.x as _, y: p2.y as _ },  Vector2 { x: p3.x as _, y: p3.y as _ }, false, true);
+                    // }
+                    // if triangulation.is_fixed(tri[2], tri[0]) {
+                        // add_point(&mut tri_polys, Vector2 { x: p3.x as _, y: p3.y as _ },  Vector2 { x: p1.x as _, y: p1.y as _ }, false, true);
+                    // }
+                    tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                    tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                    tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                }
             }
 
             let mut vao = 0;
