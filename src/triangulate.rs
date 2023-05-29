@@ -137,8 +137,9 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         return Ok(());
     }
 
-    // Skip the leading 0
-    polys.next().unwrap();
+    // Skip the first value since that's implicit
+    assert!(polys.next().unwrap() == 0);
+
     let mut next_poly = polys.next();
     for (i, p) in points.enumerate() {
         if next_poly.is_some() && next_poly.unwrap() == i {
@@ -234,12 +235,20 @@ impl ActiveTriangulation {
     }
 
     pub fn trim(self) -> Result<Triangulation, Error> {
+        // Trim away the unused triangles left from the triangulation phase. The idea is to walk
+        // the triangle mesh and save if it's inside or outside, flipping the state whenever we hit
+        // a fixed edge. Every triangle is given it's state on the first visit, and future visit
+        // just check if the state is consistent.
         let mut outside = vec![None; self.tris.len()];
 
+        // All the triangles that touch point 0 (one of the start points) are guaranteed to be
+        // outside
         let start_tri = self.inverse_tri[0];
         outside[start_tri.tri] = Some(true);
+
         let mut stack = vec![start_tri.tri];
         while let Some(x) = stack.pop() {
+            // Update all out neighbours and schedule them if they haven't been visited before
             for i in 0..3 {
                 let corner1 = anticlockwise(i);
                 let corner2 = anticlockwise(corner1);
@@ -249,42 +258,50 @@ impl ActiveTriangulation {
                     continue;
                 }
 
+                // If the joining edge is fixed we flip the state bit
                 let fixed = self.is_fixed(self.tris[x][corner1 as usize], self.tris[x][corner2 as usize]);
+                let their_state = outside[x].unwrap() ^ fixed;
 
-                let set = outside[x].unwrap() ^ fixed;
-                if outside[t_opt.unwrap().tri].is_none() {
-                    outside[t_opt.unwrap().tri] = Some(set);
-                    stack.push(t_opt.unwrap().tri);
-                } else {
-                    let cur = outside[t_opt.unwrap().tri].unwrap();
-                    if cur != set {
+                if let Some(my_state) = outside[t_opt.unwrap().tri] {
+                    // The triangle was already visited, just check for consistency
+                    if my_state != their_state {
+                        // Inconsistency, there was a hole in the polygon
                         return Err(Error::InternalAlgo);
                     }
+                } else {
+                    // Assign the current state to the triangle and schedule a visit to its
+                    // neighbours
+                    outside[t_opt.unwrap().tri] = Some(their_state);
+                    stack.push(t_opt.unwrap().tri);
                 }
             }
         }
 
+        // @SPEED We could just compact the original triangle list instead of creating a new one
+        let mut tris = Vec::new();
+        for i in 0..self.tris.len() {
+            if outside[i].unwrap() { continue; }
+
+            tris.push(self.tris[i]);
+        }
+
         return Ok(Triangulation {
+            // The only verts we'd be able to discard are the first 3 ones, since all the others
+            // are required to represent the geometry. That doesn't seem worth the hassle.
             verts: self.verts,
-            tris: self.tris.into_iter().zip(outside).filter_map(|(x, outside)| {
-                return (!outside.unwrap()).then_some(x);
-            }).collect(),
+            tris,
         })
     }
 
-    fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Result<(TriSide, Option<u8>, Option<usize>), Error> {
-        // @INCOMPLETE: We should have some fallback for when we don't have a first guess
-        let mut cursor = TriSide{
-            tri: start_tri.unwrap(),
-            side: 0,
-        };
+    fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Result<(usize, TriangleLocation), Error> {
+        let mut cursor = start_tri.unwrap_or(0);
 
         let mut iter = 0;
         loop {
             assert!(iter < 1000);
             iter += 1;
 
-            let tri = self.tris[cursor.tri];
+            let tri = self.tris[cursor];
             let loc = locate_point_in_tri(
                 &self.verts[tri[0]],
                 &self.verts[tri[1]],
@@ -292,17 +309,16 @@ impl ActiveTriangulation {
                 p,
             );
 
+            // If the triangle is outside any edge we walk in that direction, otherwise we've found
+            // it.
             match loc {
-                TriangleLocation::Inside => return Ok((cursor, None, None)),
-                TriangleLocation::OnEdge(edge) => return Ok((cursor, Some(edge), None)),
-                TriangleLocation::IsCorner(corner) => return Ok((cursor, None, Some(self.tris[cursor.tri][corner as usize]))),
                 TriangleLocation::Outside(x) => {
-                    cursor.side = x;
-                    cursor = match self.opposing_tri(&cursor) {
+                    cursor = match self.opposing_tri(&TriSide{tri: cursor, side: x}) {
                         None => return Err(Error::PointOutsideMesh),
-                        Some(x) => x.clone(),
+                        Some(x) => x.tri,
                     };
                 }
+                loc => return Ok((cursor, loc)),
             }
         }
     }
@@ -311,8 +327,8 @@ impl ActiveTriangulation {
         return self.adj[side.tri][side.side as usize];
     }
 
-    fn split_tri(&mut self, contain: &TriSide, p: &Vector) -> (usize, usize, usize) {
-        let tri1 = contain.tri;
+    fn split_tri(&mut self, tri: usize, p: &Vector) -> (usize, usize, usize) {
+        let tri1 = tri;
         let tri1o = self.tris[tri1];
 
         let v0 = tri1o[0];
@@ -321,9 +337,9 @@ impl ActiveTriangulation {
 
         // Fetch the neigbouring tris as their adjencency information will be used later on and
         // updated as well.
-        let o0 = self.opposing_tri(&TriSide{tri: contain.tri, side: 0});
-        let o1 = self.opposing_tri(&TriSide{tri: contain.tri, side: 1});
-        let o2 = self.opposing_tri(&TriSide{tri: contain.tri, side: 2});
+        let o0 = self.opposing_tri(&TriSide{tri, side: 0});
+        let o1 = self.opposing_tri(&TriSide{tri, side: 1});
+        let o2 = self.opposing_tri(&TriSide{tri, side: 2});
 
         let v3 = self.verts.len();
         self.verts.push(*p);
@@ -432,36 +448,25 @@ impl ActiveTriangulation {
     }
 
     pub fn add_point(&mut self, p: &Vector) -> Result<usize, Error> {
-        let (contain, zero, exists) = self.find_containg_tri(p, Some(0))?;
+        // @SPEED: We should save some start_tri that's likely to be close to the point
+        let (tri, loc) = self.find_containg_tri(p, None)?;
 
-        if let Some(x) = exists {
-            return Ok(x);
+        assert!(loc.is_inside());
+
+        if let TriangleLocation::IsCorner(x) = loc {
+            return Ok(self.tris[tri][x as usize]);
         }
 
-        if zero.is_none() {
-            let (new_vert, tri2, tri3) = self.split_tri(&contain, p);
-
-            let stack = vec![
-                TriSide{tri: contain.tri, side: 2},
-                TriSide{tri: tri2, side: 2},
-                TriSide{tri: tri3, side: 2},
-            ];
-            self.resolve_with_swaps(new_vert, stack);
-
-            return Ok(new_vert);
-        } else {
+        if let TriangleLocation::OnEdge(side) = loc {
             // Split the 2 bordering tris into 4
 
-            let side = zero.unwrap();
-
-            let original_tri1 = contain.tri;
-            let original_tri2 = self.opposing_tri(&TriSide{tri: contain.tri, side}).unwrap();
+            let original_tri1 = tri;
+            let original_tri2 = self.opposing_tri(&TriSide{tri, side}).unwrap();
 
             // Fetch the outside neighbours
-            let o0 = self.opposing_tri(&TriSide{tri: contain.tri, side: anticlockwise(side)});
-            let o1 = self.opposing_tri(&TriSide{tri: contain.tri, side:     clockwise(side)});
+            // o1 and o3 aren't fetched as they are left untouched
+            let o0 = self.opposing_tri(&TriSide{tri, side: anticlockwise(side)});
             let o2 = self.opposing_tri(&TriSide{tri: original_tri2.tri, side: anticlockwise(original_tri2.side)});
-            let o3 = self.opposing_tri(&TriSide{tri: original_tri2.tri, side:     clockwise(original_tri2.side)});
 
             let v0 = self.tris[original_tri1][side as usize];
             let v1 = self.tris[original_tri1][anticlockwise(side) as usize];
@@ -527,6 +532,17 @@ impl ActiveTriangulation {
             self.resolve_with_swaps(new_v, stack);
 
             return Ok(new_v);
+        } else {
+            let (new_vert, tri2, tri3) = self.split_tri(tri, p);
+
+            let stack = vec![
+                TriSide{tri, side: 2},
+                TriSide{tri: tri2, side: 2},
+                TriSide{tri: tri3, side: 2},
+            ];
+            self.resolve_with_swaps(new_vert, stack);
+
+            return Ok(new_vert);
         }
     }
 
@@ -1179,7 +1195,7 @@ mod tests {
 
         let mut tri = ActiveTriangulation::explicit(&verts, &tris);
 
-        tri.add_edge(0, 3);
+        tri.add_edge(0, 3).unwrap();
 
         assert!(validate_mesh(&tri).is_none());
     }
@@ -1267,9 +1283,9 @@ mod tests {
         };
 
         let tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
-        let (tri, _, _) = tris.find_containg_tri(&Vector{x: 0.0, y: 0.0}, Some(0)).unwrap();
+        let (tri, _) = tris.find_containg_tri(&Vector{x: 0.0, y: 0.0}, None).unwrap();
 
-        assert_eq!(tri.tri, 0);
+        assert_eq!(tri, 0);
     }
 
     #[test]
@@ -1284,7 +1300,7 @@ mod tests {
         // is allowed to extend outside of that it's not guaranteed to be outide the triangle. We
         // should do some sort of triangle bounding box to find a point that's for sure outside the
         // triangle
-        let res = tris.find_containg_tri(&Vector{x: 10.0, y: 10.0}, Some(0));
+        let res = tris.find_containg_tri(&Vector{x: 10.0, y: 10.0}, None);
 
         assert!(res.is_err());
     }
@@ -1298,7 +1314,7 @@ mod tests {
         let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
         let p = Vector{x: 0.0, y: 0.0};
 
-        tris.split_tri(&TriSide { tri: 0, side: 0 }, &p);
+        tris.split_tri(0, &p);
 
         assert_eq!(tris.tris.len(), 3);
         assert!(validate_mesh(&tris).is_none());
