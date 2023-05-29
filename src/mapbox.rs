@@ -896,7 +896,7 @@ pub mod pmtile {
 
             let mut multipoly_start = Vec::with_capacity(poly_start.len());
             // Find the clockwise polygons
-            {
+            if !poly_start.is_empty() {
                 multipoly_start.push(0);
                 for i in 1..poly_start.len() {
                     let start = poly_start[i].pos;
@@ -920,7 +920,6 @@ pub mod pmtile {
 
             let mut offset = 0;
             let mut tri_polys : Vec<super::LineVert> = vec![];
-            assert!(poly_start.len() > 0);
             for i in 0..multipoly_start.len() {
                 let multipoly = multipoly_start[i];
                 let polys_start = poly_start[multipoly].pos;

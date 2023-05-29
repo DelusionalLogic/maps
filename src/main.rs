@@ -663,8 +663,8 @@ fn main() {
 
             {
                 let text_transform = Mat4::scale_2d(8.0, 8.0).mul(&tile_transform);
-                // draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
-                // draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
+                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
+                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
             }
         }
 
