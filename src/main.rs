@@ -3,7 +3,6 @@ mod math;
 mod mapbox;
 extern crate freetype;
 
-use triangulate::triangulate;
 use math::Vector2;
 use math::Mat4;
 use math::Mat3;
@@ -421,10 +420,11 @@ fn main() {
         }
     }
 
-    let tris = triangulate(
-        &[100.0, 100.0, 200.0, 200.0],
-        &[100.0, 200.0, 200.0, 100.0]
-    );
+    let tris = triangulate::triangulate(
+        [0].iter().copied(),
+        [(100.0, 100.0), (100.0, 200.0), (200.0, 200.0), (200.0, 100.0)].iter().copied(),
+        4,
+    ).unwrap();
 
     let mut vertecies : Vec<f32> = Vec::with_capacity(5 * 3 * tris.tris.len());
     for tri in tris.tris {
@@ -549,7 +549,7 @@ fn main() {
 
         let camera_matrix = Mat4::translate(-viewport_pos.x, -viewport_pos.y).mul(&Mat4::scale_2d(scale as f64, scale as f64));
 
-        clear_color(Color(0.3, 0.4, 0.6, 1.0));
+        clear_color(Color(0.0, 0.2, 0.3, 1.0));
 
         unsafe {
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -624,7 +624,7 @@ fn main() {
                     gl::BindVertexArray(tile.poly_vao);
 
                     gl::Uniform1f(shader_program.width, 12.0);
-                    gl::Uniform4f(shader_program.fill_color, 0.0, 0.0, 1.0, 1.0);
+                    gl::Uniform4f(shader_program.fill_color, 0.1, 0.3, 0.4, 1.0);
                     gl::DrawArrays(gl::TRIANGLES, 0, tile.poly_len as _);
 
                     gl::BindVertexArray(0);

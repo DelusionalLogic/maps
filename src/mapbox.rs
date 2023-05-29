@@ -595,30 +595,45 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                                             println!("POLY");
                                             let mut cx = 0.0;
                                             let mut cy = 0.0;
+                                            let mut start_x = 0.0;
+                                            let mut start_y = 0.0;
+                                            let mut state = 0;
                                             let mut it = reader.read_packed_var_int()?;
                                             while let Some(cmd) = it.next() {
                                                 let cmd = cmd?;
                                                 if (cmd & 7) == 1 { // MoveTo
+                                                    assert!(state == 0);
+                                                    state = 1;
                                                     let x = pbuf::decode_zig(it.next().unwrap().unwrap());
                                                     cx += x as f32;
                                                     let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                                     cy += y as f32;
 
                                                     poly_start.push(LineStart{pos: polys.len()});
-                                                    // Don't push any verts until the line is drawn
+                                                    polys.push(LineVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                                                    start_x = cx;
+                                                    start_y = cy;
                                                 } else if (cmd & 7) == 2 { // LineTo
+                                                    assert!(state == 1);
+                                                    state = 2;
                                                     for _ in 0..(cmd >> 3) {
                                                         let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                                         let px = cx + x;
                                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                                         let py = cy + y;
 
-                                                        polys.push(LineVert { x:   px, y:   py, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                                                        polys.push(LineVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
 
                                                         cx = px;
                                                         cy = py;
                                                     }
                                                 } else if (cmd & 7) == 7 { // ClosePath
+                                                    assert!(state == 2);
+                                                    state = 0;
+                                                    if cx == start_x && cy == start_y {
+                                                        println!("Starting vertex is repeated. This is non-conforming, but we will patch the geometry");
+                                                        polys.pop();
+                                                    }
                                                 } else {
                                                     panic!("Unknown command");
                                                 }
@@ -902,8 +917,8 @@ pub mod pmtile {
                     }
                 }
             }
-            dbg!(&poly_start, &multipoly_start);
 
+            let mut offset = 0;
             let mut tri_polys : Vec<super::LineVert> = vec![];
             assert!(poly_start.len() > 0);
             for i in 0..multipoly_start.len() {
@@ -917,23 +932,22 @@ pub mod pmtile {
                     poly_start[multipoly_start[i+1]].pos
                 };
 
-                // The external polygons is clockwise, we need to reverse it. To do so we wan't to
-                // find the end index of its vertecies.
+                // The external polygons is clockwise, we need to reverse it. To do so we want to
+                // find the end index of its verticies.
                 let polys_extern_end = if poly_start.len() > multipoly+1 {
                     poly_start[multipoly+1].pos
                 } else {
                     polys.len()
                 };
 
-                dbg!(polys_end, polys.len(), multipoly_start.len());
 
                 let point_it = polys[polys_start..polys_extern_end].iter().rev()
-                    // .chain(polys[polys_extern_end..polys_end].iter())
+                    .chain(polys[polys_extern_end..polys_end].iter())
                     .map(|i| (i.x as f64, i.y as f64));
 
                 println!("Begin triangulation");
-                let triangulation = triangulate::triangulate_multi(poly_start.iter().map(|x| x.pos), point_it, polys.len())
-                    .trim();
+                let triangulation = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys.len()).unwrap()
+                    .trim().unwrap();
                 println!("End triangulation");
 
                 for tri in &triangulation.tris {
@@ -954,6 +968,7 @@ pub mod pmtile {
                     tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
                     tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
                 }
+                offset += polys_end - polys_start;
             }
 
             let mut vao = 0;

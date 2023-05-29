@@ -74,6 +74,14 @@ impl <T> Vector2<T>
 }
 
 impl <T> Vector2<T>
+    where T: std::ops::Mul<Output = T> + std::ops::Sub<Output = T> + Copy {
+
+    pub fn cross(&self, other: &Self) -> T {
+        return self.x * other.y - self.y * other.x;
+    }
+}
+
+impl <T> Vector2<T>
     where T: std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
 
     pub fn len_squared(&self) -> T {
