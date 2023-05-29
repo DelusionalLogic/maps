@@ -5,15 +5,19 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum Error {
-    InternalAlgo,
+    InvalidPoly,
     DuplicatedEdge,
+    InternalAlgo,
+    PointOutsideMesh,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         return match self {
-            Error::InternalAlgo => write!(f, "internal Algoritm Error"),
+            Error::InvalidPoly => write!(f, "invalid input polygon"),
             Error::DuplicatedEdge => write!(f, "duplicated Edge"),
+            Error::InternalAlgo => write!(f, "internal algoritm error"),
+            Error::PointOutsideMesh => write!(f, "point outside mesh"),
         };
     }
 }
@@ -66,8 +70,7 @@ struct TriSide {
     side: u8,
 }
 
-#[derive(Debug)]
-pub struct Tris {
+pub struct ActiveTriangulation {
     pub verts: Vec<Vector>,
     pub tris: Vec<[usize; 3]>,
     edges: HashSet<[usize; 2]>,
@@ -75,13 +78,12 @@ pub struct Tris {
     inverse_tri: Vec<TriSide>,
 }
 
-#[derive(Debug)]
-pub struct TriMesh {
+pub struct Triangulation {
     pub verts: Vec<Vector>,
     pub tris: Vec<[usize; 3]>,
 }
 
-fn build_adjecent(tris: &[[usize; 3]]) -> Vec<[Option<TriSide>; 3]> {
+fn build_adjecency(tris: &[[usize; 3]]) -> Vec<[Option<TriSide>; 3]> {
     let mut adj : Vec<[Option<TriSide>; 3]> = vec![[None, None, None]; tris.len()];
 
     // Calculate the adjecencies
@@ -110,27 +112,29 @@ fn build_adjecent(tris: &[[usize; 3]]) -> Vec<[Option<TriSide>; 3]> {
     return adj;
 }
 
-pub fn triangulate<S, P>(mut polys: S, points: P, expected_points: usize) -> Result<Tris, Error>
+pub fn triangulate<S, P>(mut polys: S, points: P, expected_points: usize) -> Result<ActiveTriangulation, Error>
 where P: Iterator<Item=(f64, f64)> + Clone,
       S: Iterator<Item=usize> {
 
     let bbox = BBox::from_points(points.clone());
 
-    let mut tris = Tris::super_tri_of_bbox(&bbox, expected_points as _);
+    let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, expected_points as _);
 
     let mut vid = Vec::with_capacity(expected_points);
 
-    fn flush_tri(tris: &mut Tris, vid: &mut Vec<usize>) {
-        assert!(vid.len() >= 3);
+    fn flush_tri(tris: &mut ActiveTriangulation, vid: &mut Vec<usize>) -> Result<(), Error> {
+        if vid.len() < 3 { return Err(Error::InvalidPoly); }
         // Add all the edges
         for i in 0..vid.len()-1 {
             let next = i + 1;
-            tris.add_edge(vid[i], vid[next]);
+            tris.add_edge(vid[i], vid[next])?;
         }
-        tris.add_edge(*vid.last().unwrap(), *vid.first().unwrap());
+        tris.add_edge(*vid.last().unwrap(), *vid.first().unwrap())?;
 
         // Begin new poly
         vid.clear();
+
+        return Ok(());
     }
 
     // Skip the leading 0
@@ -139,7 +143,7 @@ where P: Iterator<Item=(f64, f64)> + Clone,
     for (i, p) in points.enumerate() {
         if next_poly.is_some() && next_poly.unwrap() == i {
             // Flush the current poly to start a new one
-            flush_tri(&mut tris, &mut vid);
+            flush_tri(&mut tris, &mut vid)?;
             next_poly = polys.next();
         }
         vid.push(
@@ -147,13 +151,12 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         );
     }
     // Flush the final triangle
-    flush_tri(&mut tris, &mut vid);
+    flush_tri(&mut tris, &mut vid)?;
 
-    assert!(validate_mesh(&tris).is_none());
     return Ok(tris);
 }
 
-impl Tris {
+impl ActiveTriangulation {
     pub fn super_tri_of_bbox(bbox: &BBox, num_verts: u64) -> Self {
         let mut verts = Vec::with_capacity(num_verts as usize + 3);
         let mut tris = Vec::with_capacity((num_verts as usize * 2) + 1);
@@ -201,7 +204,7 @@ impl Tris {
             tri: 0, side: 2
         });
 
-        return Tris {
+        return ActiveTriangulation {
             verts,
             tris,
             edges,
@@ -211,7 +214,7 @@ impl Tris {
     }
 
     fn explicit(verts: &[Vector], tris: &[[usize; 3]]) -> Self {
-        let adj = build_adjecent(tris);
+        let adj = build_adjecency(tris);
         let mut inverse_tri = vec![TriSide{tri: 0, side: 0}; verts.len()];
 
         for i in 0..tris.len() {
@@ -221,7 +224,7 @@ impl Tris {
         }
 
 
-        return Tris {
+        return ActiveTriangulation {
             verts: verts.to_vec(),
             tris: tris.to_vec(),
             edges: HashSet::new(),
@@ -230,7 +233,7 @@ impl Tris {
         }
     }
 
-    pub fn trim(self) -> Result<TriMesh, Error> {
+    pub fn trim(self) -> Result<Triangulation, Error> {
         let mut outside = vec![None; self.tris.len()];
 
         let start_tri = self.inverse_tri[0];
@@ -261,7 +264,7 @@ impl Tris {
             }
         }
 
-        return Ok(TriMesh {
+        return Ok(Triangulation {
             verts: self.verts,
             tris: self.tris.into_iter().zip(outside).filter_map(|(x, outside)| {
                 return (!outside.unwrap()).then_some(x);
@@ -269,13 +272,7 @@ impl Tris {
         })
     }
 
-    fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Option<TriSide> {
-        return self.find_containg_tri_ex(p, start_tri)
-            // .filter(|x| !x.1.is_some())
-            .map(|x| x.0);
-    }
-
-    fn find_containg_tri_ex(&self, p: &Vector, start_tri: Option<usize>) -> Option<(TriSide, Option<u8>, Option<usize>)> {
+    fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Result<(TriSide, Option<u8>, Option<usize>), Error> {
         // @INCOMPLETE: We should have some fallback for when we don't have a first guess
         let mut cursor = TriSide{
             tri: start_tri.unwrap(),
@@ -284,50 +281,29 @@ impl Tris {
 
         let mut iter = 0;
         loop {
-            assert!(iter < 1000000);
+            assert!(iter < 1000);
             iter += 1;
 
-            let mut found = true;
-            let mut zero = None;
-            for _ in 0..3 {
-                let root = self.tris[cursor.tri][cursor.side as usize];
-                let next = self.tris[cursor.tri][anticlockwise(cursor.side) as usize];
+            let tri = self.tris[cursor.tri];
+            let loc = locate_point_in_tri(
+                &self.verts[tri[0]],
+                &self.verts[tri[1]],
+                &self.verts[tri[2]],
+                p,
+            );
 
-                let mut to_p = p.clone();
-                to_p.subv2(&self.verts[root]);
-
-                let mut to_next = self.verts[next].clone();
-
-                if to_next.x == p.x && to_next.y == p.y {
-                    return Some((cursor, None, Some(next)));
+            match loc {
+                TriangleLocation::Inside => return Ok((cursor, None, None)),
+                TriangleLocation::OnEdge(edge) => return Ok((cursor, Some(edge), None)),
+                TriangleLocation::IsCorner(corner) => return Ok((cursor, None, Some(self.tris[cursor.tri][corner as usize]))),
+                TriangleLocation::Outside(x) => {
+                    cursor.side = x;
+                    cursor = match self.opposing_tri(&cursor) {
+                        None => return Err(Error::PointOutsideMesh),
+                        Some(x) => x.clone(),
+                    };
                 }
-
-                to_next.subv2(&self.verts[root]);
-
-                // robust::orient2d(
-                //     robust::Coord { x: (), y: () }
-                // );
-                let cross = to_next.cross(&to_p);
-                // 0 here means it's ON the line
-                if cross < 0.000001 && cross > -0.00001 {
-                    zero = Some(clockwise(cursor.side));
-                }
-                if cross != 0.0 && cross.is_sign_positive() {
-                    found = false;
-                    break;
-                }
-                cursor.side = anticlockwise(cursor.side);
             }
-
-            if found {
-                return Some((cursor, zero, None));
-            }
-
-            cursor.side = clockwise(cursor.side);
-            cursor = match self.opposing_tri(&cursor) {
-                None => return None,
-                Some(x) => x.clone(),
-            };
         }
     }
 
@@ -456,8 +432,7 @@ impl Tris {
     }
 
     pub fn add_point(&mut self, p: &Vector) -> Result<usize, Error> {
-        let (contain, zero, exists) = self.find_containg_tri_ex(p, Some(0))
-            .ok_or(Error::InternalAlgo)?;
+        let (contain, zero, exists) = self.find_containg_tri(p, Some(0))?;
 
         if let Some(x) = exists {
             return Ok(x);
@@ -560,7 +535,10 @@ impl Tris {
     }
 
     pub fn add_edge(&mut self, v1i: usize, v2i: usize) -> Result<(), Error> {
-        assert!(v1i != v2i);
+        if v1i == v2i {
+            return Err(Error::InvalidPoly);
+        }
+
         if self.is_fixed(v1i, v2i) { return Err(Error::DuplicatedEdge); }
 
         // Find a triangle with one of the vertecies as a corner
@@ -583,16 +561,8 @@ impl Tris {
             let c = self.verts[tri[anticlockwise(tri_cursor.side) as usize]].clone();
 
             // Check if the vector v1 -> v2 is inside the span of the vectors v1 -> b and v1 -> c
-            let orient_ab = robust::orient2d(
-                robust::Coord{x: v1.x, y: v1.y},
-                robust::Coord{x:  b.x, y:  b.y},
-                robust::Coord{x: v2.x, y: v2.y},
-            );
-            let orient_ac = robust::orient2d(
-                robust::Coord{x: v1.x, y: v1.y},
-                robust::Coord{x:  c.x, y:  c.y},
-                robust::Coord{x: v2.x, y: v2.y},
-            );
+            let orient_ab = orient2d(&v1, &b, &v2);
+            let orient_ac = orient2d(&v1, &c, &v2);
 
             let right_of_ab =  orient_ab >= 0.0;
             let left_of_ac =  orient_ac <= 0.0;
@@ -608,7 +578,9 @@ impl Tris {
 
             // If we arrive back at the start, that's an error. It should NEVER be possible for
             // no triangle to straddle the edge
-            assert!(op_tri.tri != start_tri.tri);
+            if op_tri.tri == start_tri.tri {
+                return Err(Error::InternalAlgo);
+            }
 
             tri_cursor.tri = op_tri.tri;
             tri_cursor.side = clockwise(op_tri.side);
@@ -645,16 +617,18 @@ impl Tris {
             return Ok(());
         }
 
-        assert!(!self.is_fixed(
+        if self.is_fixed(
             self.tris[tri_cursor.tri][clockwise(tri_cursor.side) as usize],
             self.tris[tri_cursor.tri][anticlockwise(tri_cursor.side) as usize],
-        ));
+        ) {
+            // Edge crosses other fixed edge
+            return Err(Error::InvalidPoly);
+        }
 
+        // We'll tear our exactly as many triangles as we'll put back afterwards so we need to save
+        // the triangle ids we tear out to reuse them when rebuilding
         // Kill the inital tri
         let mut dead_tris: Vec<usize> = vec![tri_cursor.tri];
-
-        let mut to = v2.clone();
-        to.subv2(&v1);
 
         // Walk the strip of triangles that are cut by the new edge until we arrive at v2i
         let mut iter = 0;
@@ -680,19 +654,11 @@ impl Tris {
             // We need to figure out if the vertex is above or below the new edge.
             let vi = self.tris[op_tri.tri][op_tri.side as usize];
             let vo = self.verts[vi];
-            let mut v1vo = vo.clone();
-            v1vo.subv2(&v1);
 
-            let v1_right = v1vo.cross(&to).is_sign_positive();
-            let orient = robust::orient2d(
-                robust::Coord { x:  0.0, y:  0.0 },
-                robust::Coord { x: v1vo.x, y: v1vo.y },
-                robust::Coord { x: to.x, y: to.y },
-            );
-            let v1_right_check =  orient > 0.0;
-            assert!(v1_right == v1_right_check);
+            let orient = orient2d(&v1, &vo, &v2);
+            let is_above =  orient > 0.0;
 
-            if v1_right {
+            if is_above {
                 // Vertex is above edge
                 upper.push(self.tris[op_tri.tri][op_tri.side as usize]);
                 upper_adj.push(self.opposing_tri(&TriSide{tri: op_tri.tri, side: clockwise(op_tri.side)}));
@@ -709,14 +675,20 @@ impl Tris {
 
         // @SPEED: Maybe this isn't necessary
         let upper_end = upper.len();
+        // The pseudo poly will have one for adjecency than the number of verticies. We add a dummy
+        // vertex value to make the array indecies match
         upper.push(0xDEADBEEF);
         upper.append(&mut lower);
         upper_adj.append(&mut lower_adj);
+        // New tri will contain the new triangles that match corresponding opposites of the
+        // upper_adj
         let mut new_tri = vec![TriSide{tri: 0, side: 0}; upper_adj.len()];
 
         let uv = self.rebuild_tris(&mut dead_tris, &upper, &upper_adj, &mut new_tri, v1i, v2i, false, 0, upper_end-1, None);
         let lv = self.rebuild_tris(&mut dead_tris, &upper, &upper_adj, &mut new_tri, v1i, v2i, true, upper_end+1, upper.len()-1, None);
 
+        // @CLEANUP: I don't think we can ever NOT create a triangle at both top and bottom since
+        // the initial cut will always add vertex to both upper and lower
         if let Some(x) = uv {
             if let Some(y) = lv {
                 self.adj[y][2] = Some(TriSide{tri: x, side: 2});
@@ -734,41 +706,42 @@ impl Tris {
             self.inverse_tri[v2i] = TriSide{tri: x, side: 0};
         }
 
-        // @COMPLETENESS: If the pseudo-poly contains repeated vertecies (figure 7) we need to do
-        // some stuff to repair that here
-        let mut missing = vec![true; upper_adj.len()];
+        // Adjust the adjecencies of the tris touching the new ones
+        for (l, r) in upper_adj.iter().zip(&new_tri) {
+            if let Some(l) = l {
+                self.adj[l.tri][l.side as usize] = Some(*r);
+            }
+        }
+
+
+        // Repair the adjecency information if the pseudo-poly contaied repeated verticies
+        // (figure 7 in the paper)
         for i in 2..upper.len() {
             if i == upper_end || i-2 == upper_end {
                 continue;
             }
 
+            // If the node is present in the array twice the two new triangles will share and edge
+            // and will therefore be each other adjecents. They'll have recoded the old triangle
+            // though, so we go into them here and patch them directly
             if upper[i] == upper[i-2] {
                 println!("{} and {} share an edge", i, i-2);
                 let t1 = new_tri[i-1];
                 let t2 = new_tri[i];
-
-                missing[i-1] = false;
-                missing[i] = false;
 
                 self.adj[t1.tri][t1.side as usize] = Some(t2);
                 self.adj[t2.tri][t2.side as usize] = Some(t1);
             }
         }
 
-        // Adjust the adjecencies of the tris touching the new ones
-        for ((l, r), m) in upper_adj.iter().zip(new_tri).zip(missing) {
-            if !m { continue; }
-            if let Some(l) = l {
-                self.adj[l.tri][l.side as usize] = Some(r);
-            }
-        }
-
+        // Fix the edge
         self.edges.insert([v1i, v2i]);
 
         return Ok(());
     }
 
 
+    // @CLEANUP: Maybe we can rework this to use slices instead of vectors for verts and verts_adj
     fn rebuild_tris(&mut self, dead_tris: &mut Vec<usize>, verts: &Vec<usize>, verts_adj: &Vec<Option<TriSide>>, new_tri: &mut [TriSide], v1: usize, v2: usize, swap: bool, start: usize, end: usize, link: Option<TriSide>) -> Option<usize> {
         // Rebuild a triangle strip after tearing it out. We have to be careful to adjust the
         // adjecency relationship between triangles correctly
@@ -778,7 +751,6 @@ impl Tris {
         }
 
         let mut ci = start;
-        let mut c = verts[ci];
 
         let newt = dead_tris.pop().unwrap();
 
@@ -803,17 +775,17 @@ impl Tris {
                     a = self.verts[v1];
                     b = self.verts[v2];
                 }
-                if incircle(a, b, self.verts[c], &self.verts[v]) {
+
+                if incircle(a, b, self.verts[verts[ci]], &self.verts[v]) {
                     ci = i;
-                    c = v;
                 }
             }
 
             if ci >= 1 {
-                v2_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, v1, c, swap, start, ci-1, Some(v2_link))
+                v2_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, v1, verts[ci], swap, start, ci-1, Some(v2_link))
                 .map(|x| TriSide{tri: x, side: 2});
             }
-            v1_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, c, v2, swap, ci+1, end, Some(v1_link))
+            v1_t = self.rebuild_tris(dead_tris, verts, verts_adj, new_tri, verts[ci], v2, swap, ci+1, end, Some(v1_link))
                 .map(|x| TriSide{tri: x, side: 2});
         }
 
@@ -826,26 +798,24 @@ impl Tris {
             new_tri[ci] = v2_link;
         }
 
+        self.tris[newt][2] = verts[ci];
+        self.adj[newt][2] = link;
         if swap {
             self.tris[newt][0] = v2;
             self.tris[newt][1] = v1;
-            self.tris[newt][2] = c;
 
             self.adj[newt][0] = v2_t;
             self.adj[newt][1] = v1_t;
-            self.adj[newt][2] = link;
         } else {
             self.tris[newt][0] = v1;
             self.tris[newt][1] = v2;
-            self.tris[newt][2] = c;
 
             self.adj[newt][0] = v1_t;
             self.adj[newt][1] = v2_t;
-            self.adj[newt][2] = link;
         }
 
-        self.inverse_tri[c].tri = newt;
-        self.inverse_tri[c].side = 2;
+        self.inverse_tri[verts[ci]].tri = newt;
+        self.inverse_tri[verts[ci]].side = 2;
 
         return Some(newt);
     }
@@ -860,7 +830,7 @@ enum ValidationError {
     MissingEdges,
 }
 
-fn is_winding_correct(tris: &Tris, tri: usize) -> bool {
+fn is_winding_correct(tris: &ActiveTriangulation, tri: usize) -> bool {
     let t = tris.tris[tri];
     let a = tris.verts[t[0]];
     let mut b = tris.verts[t[1]];
@@ -872,7 +842,7 @@ fn is_winding_correct(tris: &Tris, tri: usize) -> bool {
     return !b.cross(&c).is_sign_positive();
 }
 
-fn validate_mesh(tris: &Tris) -> Option<ValidationError> {
+fn validate_mesh(tris: &ActiveTriangulation) -> Option<ValidationError> {
     if tris.verts.len() != tris.inverse_tri.len() { return Some(ValidationError::InvalidStructure); };
     if  tris.tris.len() !=         tris.adj.len() { return Some(ValidationError::InvalidStructure) ; }
 
@@ -887,7 +857,7 @@ fn validate_mesh(tris: &Tris) -> Option<ValidationError> {
     // Check the adjecency by just building it again and checking that it's the same. There's
     // only one valid adjencency array for a given topology, so this should be robust
     {
-        let adj = build_adjecent(&tris.tris);
+        let adj = build_adjecency(&tris.tris);
         if tris.adj != adj { return Some(ValidationError::InvalidAdjecency); }
     };
 
@@ -928,12 +898,82 @@ fn incircle(a: Vector, b: Vector, c: Vector, d: &Vector) -> bool {
     return det < 0.0;
 }
 
+fn orient2d(a: &Vector, b: &Vector, c: &Vector) -> f64 {
+    return robust::orient2d(
+        robust::Coord{x: a.x, y: a.y},
+        robust::Coord{x: b.x, y: b.y},
+        robust::Coord{x: c.x, y: c.y},
+    );
+}
+
 fn anticlockwise(side: u8) -> u8 {
     return (side + 1) % 3;
 }
 
 fn clockwise(side: u8) -> u8 {
-    return if side == 0 { 2 } else { side - 1 };
+    return (side + 2) % 3;
+}
+
+#[derive(Debug)]
+enum TriangleLocation {
+    Inside,
+    OnEdge(u8),
+    IsCorner(u8),
+    Outside(u8),
+}
+
+impl TriangleLocation {
+    fn is_inside(&self) -> bool {
+        return match self {
+            TriangleLocation::Inside => true,
+            TriangleLocation::OnEdge(_) => true,
+            TriangleLocation::IsCorner(_) => true,
+            TriangleLocation::Outside(_) => false,
+        }
+    }
+}
+
+fn locate_point_in_tri(p0: &Vector, p1: &Vector, p2: &Vector, p: &Vector) -> TriangleLocation {
+    let mut on_edge = None;
+
+    if p0.x == p.x && p0.y == p.y {
+        return TriangleLocation::IsCorner(0);
+    }
+
+    let orient = orient2d(p0, p1, p);
+    if orient == 0.0 {
+        on_edge = Some(2);
+    } else if orient > 0.0 {
+        return TriangleLocation::Outside(2);
+    }
+
+    if p1.x == p.x && p1.y == p.y {
+        return TriangleLocation::IsCorner(1);
+    }
+
+    let orient = orient2d(p1, p2, p);
+    if orient == 0.0 {
+        on_edge = Some(0);
+    } else if orient > 0.0 {
+        return TriangleLocation::Outside(0);
+    }
+
+    if p2.x == p.x && p2.y == p.y {
+        return TriangleLocation::IsCorner(2);
+    }
+
+    let orient = orient2d(p2, p0, p);
+    if orient == 0.0 {
+        on_edge = Some(1);
+    } else if orient > 0.0 {
+        return TriangleLocation::Outside(1);
+    }
+
+    if let Some(x) = on_edge {
+        return TriangleLocation::OnEdge(x);
+    }
+
+    return TriangleLocation::Inside;
 }
 
 #[cfg(test)]
@@ -964,47 +1004,11 @@ mod tests {
         assert_eq!(bbox.max.y, 3.0);
     }
 
-    fn left_of(p1: &Vector, p2: &Vector, p3: &Vector) -> bool {
-        return f64::is_sign_negative((p2.x-p1.x)*(p3.y-p1.y) - (p2.y-p1.y)*(p3.x-p1.x));
-    }
-    #[test]
-    fn left_of_test() {
-        let p1 = Vector{ x:1.0, y:  1.0 };
-        let p2 = Vector{ x:1.0, y:101.0 };
-        let p3 = Vector{ x:1.1, y: 51.0 };
-
-        assert!(left_of(&p1, &p2, &p3));
-    }
-    #[test]
-    fn point_falls_right() {
-        let p1 = Vector{ x:1.0, y:  1.0 };
-        let p2 = Vector{ x:1.0, y:101.0 };
-        let p3 = Vector{ x:0.9, y: 51.0 };
-
-        assert!(!left_of(&p1, &p2, &p3));
-    }
-
-    fn point_inside_tri(p1: &Vector, p2: &Vector, p3: &Vector, p4: &Vector) -> bool {
-        if !left_of(p1, p2, p4) {
-            return false;
-        }
-
-        if !left_of(p2, p3, p4) {
-            return false;
-        }
-
-        if !left_of(p3, p1, p4) {
-            return false;
-        }
-
-        return true;
-    }
-
-    fn box_inside_tri(tri: &Tris, bbox: &BBox) -> bool {
+    fn box_inside_tri(tri: &ActiveTriangulation, bbox: &BBox) -> bool {
         let first_tri = tri.tris[0];
 
         let check = |x: f64, y: f64| -> bool {
-            return !point_inside_tri(&tri.verts[first_tri[0]], &tri.verts[first_tri[1]], &tri.verts[first_tri[2]], &Vector{x, y});
+            return !locate_point_in_tri(&tri.verts[first_tri[0]], &tri.verts[first_tri[1]], &tri.verts[first_tri[2]], &Vector{x, y}).is_inside();
         };
 
         if check(bbox.min.x, bbox.min.y) {
@@ -1030,7 +1034,7 @@ mod tests {
             max: Vector{x:  1.0, y:  1.0},
         };
 
-        let tri = Tris::super_tri_of_bbox(&bbox, 0);
+        let tri = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
 
         // The only verticies should be the initial triangle
         assert_eq!(tri.verts.len(), 3);
@@ -1064,7 +1068,7 @@ mod tests {
             [0, 2, 3],
         ];
 
-        let tri = Tris::explicit(&verts, &tris);
+        let tri = ActiveTriangulation::explicit(&verts, &tris);
 
         assert!(validate_mesh(&tri).is_none());
 
@@ -1101,7 +1105,7 @@ mod tests {
             [0, 2, 3],
         ];
 
-        let mut tri = Tris::explicit(&verts, &tris);
+        let mut tri = ActiveTriangulation::explicit(&verts, &tris);
 
         tri.add_edge(1, 3);
 
@@ -1142,7 +1146,7 @@ mod tests {
             [5, 11, 0],
         ];
 
-        let mut tri = Tris::explicit(&verts, &tris);
+        let mut tri = ActiveTriangulation::explicit(&verts, &tris);
 
         tri.add_edge(0, 3).unwrap();
 
@@ -1173,7 +1177,7 @@ mod tests {
             [3, 4, 2],
         ];
 
-        let mut tri = Tris::explicit(&verts, &tris);
+        let mut tri = ActiveTriangulation::explicit(&verts, &tris);
 
         tri.add_edge(0, 3);
 
@@ -1194,7 +1198,7 @@ mod tests {
             [0, 2, 3],
         ];
 
-        let mut tri = Tris::explicit(&verts, &tris);
+        let mut tri = ActiveTriangulation::explicit(&verts, &tris);
 
         // Compute the upper node
         {
@@ -1262,11 +1266,10 @@ mod tests {
             max: Vector{x:  1.0, y:  1.0},
         };
 
-        let tris = Tris::super_tri_of_bbox(&bbox, 0);
-        let tri = tris.find_containg_tri(&Vector{x: 0.0, y: 0.0}, Some(0));
+        let tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
+        let (tri, _, _) = tris.find_containg_tri(&Vector{x: 0.0, y: 0.0}, Some(0)).unwrap();
 
-        assert!(tri.is_some());
-        assert_eq!(tri.unwrap().tri, 0);
+        assert_eq!(tri.tri, 0);
     }
 
     #[test]
@@ -1276,14 +1279,14 @@ mod tests {
             max: Vector{x:  1.0, y:  1.0},
         };
 
-        let tris = Tris::super_tri_of_bbox(&bbox, 0);
+        let tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
         // @FRAGILE: the (10, 10) here is arbitrary. It''s outside the bbox, but since the triangle
         // is allowed to extend outside of that it's not guaranteed to be outide the triangle. We
         // should do some sort of triangle bounding box to find a point that's for sure outside the
         // triangle
-        let tri = tris.find_containg_tri(&Vector{x: 10.0, y: 10.0}, Some(0));
+        let res = tris.find_containg_tri(&Vector{x: 10.0, y: 10.0}, Some(0));
 
-        assert!(tri.is_none());
+        assert!(res.is_err());
     }
 
     #[test]
@@ -1292,7 +1295,7 @@ mod tests {
             min: Vector{x: -1.0, y: -1.0},
             max: Vector{x:  1.0, y:  1.0},
         };
-        let mut tris = Tris::super_tri_of_bbox(&bbox, 0);
+        let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
         let p = Vector{x: 0.0, y: 0.0};
 
         tris.split_tri(&TriSide { tri: 0, side: 0 }, &p);
@@ -1307,7 +1310,7 @@ mod tests {
             min: Vector{x: -1.0, y: -1.0},
             max: Vector{x:  1.0, y:  1.0},
         };
-        let mut tris = Tris::super_tri_of_bbox(&bbox, 0);
+        let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
         let p = Vector{x: 0.0, y: 0.0};
 
         let vert = tris.add_point(&p).unwrap();
@@ -1329,7 +1332,7 @@ mod tests {
             min: Vector{x: -1.0, y: -1.0},
             max: Vector{x:  1.0, y:  1.0},
         };
-        let mut tris = Tris::super_tri_of_bbox(&bbox, 0);
+        let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, 0);
 
         let v1 = tris.add_point(&Vector{x: 1.0, y: 0.0}).unwrap();
         let v2 = tris.add_point(&Vector{x:-1.0, y: 0.0}).unwrap();
@@ -1348,60 +1351,6 @@ mod tests {
 
         // Now add a vertex right between them. This will be ON the previous asserted edge
         tris.add_point(&Vector{x: 0.0, y: 0.0}).unwrap();
-
-        assert!(validate_mesh(&tris).is_none());
-    }
-
-    // #[test]
-    fn fuzz() {
-        let p = vec![
-            (4096.0, 4096.0),
-            (4096.0,    0.0),
-            (   0.0, 4096.0),
-        ];
-        let tris = triangulate([0].iter().copied(), p.iter().copied(), p.len()).unwrap();
-        assert!(validate_mesh(&tris).is_none());
-
-        let p = Vector{x: 1487.0, y: 4096.0};
-        let tri = tris.find_containg_tri_ex(&p, Some(0)).unwrap();
-        assert!(tri.1.is_some());
-
-        let v1 = tris.verts[tris.tris[tri.0.tri][clockwise(tri.1.unwrap()) as usize]];
-        let v2 = tris.verts[tris.tris[tri.0.tri][anticlockwise(tri.1.unwrap()) as usize]];
-        let mut to_p = p.clone();
-        to_p.subv2(&v1);
-        let mut to_v2 = v2.clone();
-        to_v2.subv2(&v1);
-
-        assert!(to_v2.cross(&to_p) == 0.0);
-        // assert!(false);
-    }
-
-    // #[test]
-    fn fuzz2() {
-        let p = vec![
-            (4096.0, 4096.0),
-            (4096.0,    0.0),
-            (   0.0, 4096.0),
-            (4096.0, 1487.0),
-        ];
-
-        let tris = triangulate([0].iter().copied(), p.iter().copied(), p.len()).unwrap();
-        assert!(validate_mesh(&tris).is_none());
-    }
-
-    // #[test]
-    fn fuzz3() {
-        let p = [
-            (3656.00, 4096.00),
-            (4096.00, 4096.00),
-            (4096.00,    0.00),
-            (3736.00, 3952.00),
-            (3736.00, 3967.00),
-        ];
-
-        let polys = [0 as usize];
-        let tris = triangulate(polys.iter().cloned(), p.iter().copied(), p.len()).unwrap();
 
         assert!(validate_mesh(&tris).is_none());
     }
