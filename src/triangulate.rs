@@ -128,8 +128,14 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         for i in 0..vid.len()-1 {
             let next = i + 1;
             tris.add_edge(vid[i], vid[next])?;
+        if let Some(x) = validate_mesh(&tris) {
+            panic!("{:?}", x);
+        }
         }
         tris.add_edge(*vid.last().unwrap(), *vid.first().unwrap())?;
+        if let Some(x) = validate_mesh(&tris) {
+            panic!("{:?}", x);
+        }
 
         // Begin new poly
         vid.clear();
@@ -150,6 +156,9 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         vid.push(
             tris.add_point(&Vector{x: p.0, y: p.1})?
         );
+        if let Some(x) = validate_mesh(&tris) {
+            panic!("{:?}", x);
+        }
     }
     // Flush the final triangle
     flush_tri(&mut tris, &mut vid)?;
@@ -730,6 +739,7 @@ impl ActiveTriangulation {
         }
 
 
+        dbg!(&upper);
         // Repair the adjecency information if the pseudo-poly contaied repeated verticies
         // (figure 7 in the paper)
         for i in 2..upper.len() {

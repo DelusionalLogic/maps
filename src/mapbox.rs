@@ -513,7 +513,22 @@ pub struct LineStart {
     pos: usize,
 }
 
-pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<(Vec<LineStart>, Vec<LineVert>, Vec<LineStart>, Vec<LineVert>)> {
+pub struct LineGeom {
+    start: Vec<LineStart>,
+    data: Vec<LineVert>,
+}
+
+pub struct PolyGeom {
+    start: Vec<LineStart>,
+    data: Vec<LineVert>,
+}
+
+pub struct RawTile {
+    pub roads: LineGeom,
+    pub earth: PolyGeom,
+}
+
+pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<RawTile> {
     let mut start = vec![];
     let mut vert : Vec<LineVert> = vec![];
     let mut poly_start : Vec<LineStart> = vec![];
@@ -536,7 +551,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                             assert!(!seen_name);
                             let name = reader.read_string()?;
                             println!("Layer named {}", name);
-                            if name != "roads" && name != "earth" {
+                            if name != "roads" && name != "buildings" {
                                 reader.exit_message()?;
                                 break 'layer;
                             }
@@ -653,7 +668,16 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
         }
     }
 
-    return Ok((start, vert, poly_start, polys));
+    let roads = LineGeom {
+        start,
+        data: vert,
+    };
+    let earth = PolyGeom {
+        start: poly_start,
+        data: polys,
+    };
+
+    return Ok(RawTile { roads, earth });
 }
 
 pub mod pmtile {
@@ -781,27 +805,64 @@ pub mod pmtile {
         return (acc + d) as u64;
     }
 
+    pub enum LayerType {
+        Earth,
+        Roads,
+
+        SIZE,
+    }
+
+    pub struct Layer {
+        pub vao: u32,
+        pub vbo: u32,
+        pub size: usize,
+    }
+
+    pub struct Layers {
+        data: [Option<Layer>; LayerType::SIZE as usize],
+    }
+
+    impl Default for Layers {
+        fn default() -> Self {
+            return [None, None].into();
+        }
+    }
+
+    impl From<[Option<Layer>; LayerType::SIZE as usize]> for Layers {
+        fn from(data: [Option<Layer>; LayerType::SIZE as usize]) -> Self {
+            return Layers{
+                data,
+            };
+        }
+    }
+
+    impl std::ops::Index<LayerType> for Layers {
+        type Output = Option<Layer>;
+
+        fn index(&self, index: LayerType) -> &Self::Output {
+            return &self.data[index as usize];
+        }
+    }
+
     pub struct Tile {
         pub tid: u64,
         pub x: u64,
         pub y: u64,
         pub z: u8,
         pub extent: u16,
-        pub vao: u32,
-        pub vbo: u32,
-        pub vertex_len: usize,
-        pub poly_vao: u32,
-        pub poly_vbo: u32,
-        pub poly_len: usize,
+
+        pub layers: Layers,
     }
 
     impl Drop for Tile {
         fn drop(&mut self) {
-            unsafe {
-                gl::DeleteVertexArrays(1, &self.vao);
-                gl::DeleteBuffers(1, &self.vbo);
-                gl::DeleteVertexArrays(1, &self.poly_vao);
-                gl::DeleteBuffers(1, &self.poly_vbo);
+            for layer in &self.layers.data {
+                if let Some(layer) = layer {
+                    unsafe {
+                        gl::DeleteVertexArrays(1, &layer.vao);
+                        gl::DeleteBuffers(1, &layer.vbo);
+                    }
+                }
             }
         }
     }
@@ -862,35 +923,40 @@ pub mod pmtile {
     }
 
     fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
-        let (start, verts, poly_start, polys) = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
+        let raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
-        let mut vao = 0;
-        unsafe { gl::GenVertexArrays(1, &mut vao) };
+        let road_layer;
+        {
+            let mut vao = 0;
+            unsafe { gl::GenVertexArrays(1, &mut vao) };
 
-        let mut vbo = 0;
-        unsafe { gl::GenBuffers(1, &mut vbo) };
+            let mut vbo = 0;
+            unsafe { gl::GenBuffers(1, &mut vbo) };
 
-        unsafe {
-            gl::BindVertexArray(vao);
+            unsafe {
+                gl::BindVertexArray(vao);
 
-            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-            gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<super::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+                gl::BufferData(gl::ARRAY_BUFFER, (raw_tile.roads.data.len() * std::mem::size_of::<super::LineVert>()) as _, raw_tile.roads.data.as_ptr().cast(), gl::STATIC_DRAW);
 
-            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
-            gl::EnableVertexAttribArray(0);
-            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-            gl::EnableVertexAttribArray(1);
-            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-            gl::EnableVertexAttribArray(2);
+                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+                gl::EnableVertexAttribArray(0);
+                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(1);
+                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(2);
 
-            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-            gl::BindVertexArray(0);
+                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+                gl::BindVertexArray(0);
+            }
+            road_layer = Some(Layer{ vao, vbo, size: raw_tile.roads.data.len() });
         }
 
-        let poly_vao;
-        let poly_vbo;
-        let poly_len;
+        let earth_layer;
         {
+            let poly_start = raw_tile.earth.start;
+            let polys = raw_tile.earth.data;
+
             // Triangulate poly
             use crate::triangulate;
 
@@ -944,10 +1010,8 @@ pub mod pmtile {
                     .chain(polys[polys_extern_end..polys_end].iter())
                     .map(|i| (i.x as f64, i.y as f64));
 
-                println!("Begin triangulation");
                 let triangulation = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys.len()).unwrap()
                     .trim().unwrap();
-                println!("End triangulation");
 
                 for tri in &triangulation.tris {
                     let p1 = triangulation.verts[tri[0]];
@@ -992,10 +1056,13 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            poly_vao = vao;
-            poly_vbo = vbo;
-            poly_len = tri_polys.len();
+            earth_layer = Some(Layer{ vao, vbo, size: tri_polys.len() });
         }
+
+        let layers = [
+            earth_layer,
+            road_layer,
+        ];
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
@@ -1005,12 +1072,7 @@ pub mod pmtile {
             y,
             z,
             extent: 4096,
-            vao,
-            vbo,
-            vertex_len: verts.len(),
-            poly_vao,
-            poly_vbo,
-            poly_len,
+            layers: layers.into(),
         });
     }
 
@@ -1066,6 +1128,11 @@ pub mod pmtile {
             gl::BindVertexArray(0);
         }
 
+        let layers = [
+            None,
+            Some(Layer{ vao, vbo, size: verts.len() }),
+        ];
+
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
         return Tile{
             tid,
@@ -1073,12 +1140,7 @@ pub mod pmtile {
             y,
             z,
             extent: 4096,
-            vao,
-            vbo,
-            vertex_len: verts.len(),
-            poly_vao: 0,
-            poly_vbo: 0,
-            poly_len: 0,
+            layers: layers.into(),
         };
     }
 

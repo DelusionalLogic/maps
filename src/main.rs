@@ -14,6 +14,8 @@ use glfw;
 use glfw::Context;
 use gl;
 
+use crate::mapbox::pmtile::LayerType;
+
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
@@ -616,32 +618,34 @@ fn main() {
 
             let tile_transform32: [f32; 16] = (&tile_transform).into();
 
-            if tile.poly_len > 0 {
+            if let Some(layer) = &tile.layers[LayerType::Earth] {
                 unsafe {
                     gl::UseProgram(shader_program.program);
 
                     gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                    gl::BindVertexArray(tile.poly_vao);
+                    gl::BindVertexArray(layer.vao);
 
                     gl::Uniform1f(shader_program.width, 12.0);
                     gl::Uniform4f(shader_program.fill_color, 0.1, 0.3, 0.4, 1.0);
-                    gl::DrawArrays(gl::TRIANGLES, 0, tile.poly_len as _);
+                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
 
                     gl::BindVertexArray(0);
                 }
             }
 
-            unsafe {
-                gl::UseProgram(shader_program.program);
+            if let Some(layer) = &tile.layers[LayerType::Roads] {
+                unsafe {
+                    gl::UseProgram(shader_program.program);
 
-                gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                gl::BindVertexArray(tile.vao);
+                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                    gl::BindVertexArray(layer.vao);
 
-                gl::Uniform1f(shader_program.width, 12.0);
-                gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
-                gl::DrawArrays(gl::TRIANGLES, 0, tile.vertex_len as _);
+                    gl::Uniform1f(shader_program.width, 12.0);
+                    gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
+                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
 
-                gl::BindVertexArray(0);
+                    gl::BindVertexArray(0);
+                }
             }
 
             unsafe {
