@@ -519,22 +519,23 @@ pub struct PolyGeom {
 }
 
 pub struct RawTile {
-    pub roads: LineGeom,
+    pub buildings: PolyGeom,
     pub earth: PolyGeom,
+    pub roads: LineGeom,
 }
 
 pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
-    let mut start = vec![];
-    let mut vert : Vec<LineVert> = vec![];
-    let mut poly_start : Vec<LineStart> = vec![];
-    let mut polys : Vec<LineVert> = vec![];
+    let mut earth_layer = None;
+    let mut buildings_layer = None;
+    let mut roads_layer = None;
 
     while let Ok(field) = reader.next() {
         match field {
             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 3} => {
-                let mut seen_name = false;
                 reader.enter_message()?;
-                'layer: while let Ok(field) = reader.next() {
+                let mut name = None;
+                let layer_message = reader.clone();
+                while let Ok(field) = reader.next() {
                     match field {
                         pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
                         pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 15} => {
@@ -542,119 +543,19 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                             assert_eq!(version, 2);
                         }
                         pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
-                            assert!(!seen_name);
-                            let name = reader.read_string()?;
-                            println!("Layer named {}", name);
-                            if name != "roads" && name != "earth" {
-                                reader.exit_message()?;
-                                break 'layer;
-                            }
-
-                            seen_name = true;
-                        }
-                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
-                            assert!(seen_name);
-                            reader.enter_message()?;
-                            let mut seen_type = None;
-                            'feature: while let Ok(field) = reader.next() {
-                                match field {
-                                    pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
-                                        let geo_type = reader.read_var_int()?;
-                                        // if  geo_type != 2 {
-                                        //     reader.exit_message()?;
-                                        //     break 'feature;
-                                        // }
-
-                                        seen_type = Some(geo_type);
-                                    },
-                                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
-                                        assert!(seen_type.is_some());
-
-                                        if seen_type.unwrap() == 2 {
-                                            let mut cx = 0.0;
-                                            let mut cy = 0.0;
-                                            let mut it = reader.read_packed_var_int()?;
-                                            while let Some(cmd) = it.next() {
-                                                let cmd = cmd?;
-                                                if (cmd & 7) == 1 { // MoveTo
-                                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                    cx += x as f32;
-                                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                    cy += y as f32;
-
-                                                    start.push(LineStart{pos: vert.len()});
-                                                    // Don't push any verts until the line is drawn
-                                                } else if (cmd & 7) == 2 { // LineTo
-                                                    for i in 0..(cmd >> 3) {
-                                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                        let px = cx + x;
-                                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                        let py = cy + y;
-
-                                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
-
-                                                        cx = px;
-                                                        cy = py;
-                                                    }
-                                                } else {
-                                                    panic!("Unknown command");
-                                                }
-                                            }
-                                        } else if seen_type.unwrap() == 3 {
-                                            println!("POLY");
-                                            let mut cx = 0.0;
-                                            let mut cy = 0.0;
-                                            let mut start_x = 0.0;
-                                            let mut start_y = 0.0;
-                                            let mut state = 0;
-                                            let mut it = reader.read_packed_var_int()?;
-                                            while let Some(cmd) = it.next() {
-                                                let cmd = cmd?;
-                                                if (cmd & 7) == 1 { // MoveTo
-                                                    assert!(state == 0);
-                                                    state = 1;
-                                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                    cx += x as f32;
-                                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                                    cy += y as f32;
-
-                                                    poly_start.push(LineStart{pos: polys.len()});
-                                                    polys.push(LineVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                                                    start_x = cx;
-                                                    start_y = cy;
-                                                } else if (cmd & 7) == 2 { // LineTo
-                                                    assert!(state == 1);
-                                                    state = 2;
-                                                    for _ in 0..(cmd >> 3) {
-                                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                        let px = cx + x;
-                                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                                        let py = cy + y;
-
-                                                        polys.push(LineVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
-
-                                                        cx = px;
-                                                        cy = py;
-                                                    }
-                                                } else if (cmd & 7) == 7 { // ClosePath
-                                                    assert!(state == 2);
-                                                    state = 0;
-                                                    if cx == start_x && cy == start_y {
-                                                        println!("Starting vertex is repeated. This is non-conforming, but we will patch the geometry");
-                                                        polys.pop();
-                                                    }
-                                                } else {
-                                                    panic!("Unknown command");
-                                                }
-                                            }
-                                        }
-                                    }
-                                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                                    x => { reader.skip(x.wtype)?; },
-                                }
-                            }
+                            name = Some(reader.read_string()?);
                         }
                         x => { reader.skip(x.wtype)?; },
+                    }
+                }
+
+                if let Some(name) = name {
+                    println!("Layer named {}", name);
+                    match name.as_str() {
+                        "roads" => roads_layer = Some(layer_message),
+                        "earth" => earth_layer = Some(layer_message),
+                        "buildings" => buildings_layer = Some(layer_message),
+                        _ => {},
                     }
                 }
             },
@@ -662,16 +563,172 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     }
 
-    let roads = LineGeom {
-        start,
-        data: vert,
-    };
-    let earth = PolyGeom {
-        start: poly_start,
-        data: polys,
+    fn read_line_layer(mut reader: pbuf::Message) -> pbuf::Result<LineGeom> {
+        let mut start = vec![];
+        let mut vert : Vec<LineVert> = vec![];
+
+        while let Ok(field) = reader.next() {
+            match field {
+                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                    reader.enter_message()?;
+                    while let Ok(field) = reader.next() {
+                        match field {
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
+                                let geo_type = reader.read_var_int()?;
+                                assert!(geo_type == 2);
+                            },
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                                let mut cx = 0.0;
+                                let mut cy = 0.0;
+                                let mut it = reader.read_packed_var_int()?;
+                                while let Some(cmd) = it.next() {
+                                    let cmd = cmd?;
+                                    if (cmd & 7) == 1 { // MoveTo
+                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                        cx += x as f32;
+                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                        cy += y as f32;
+
+                                        start.push(LineStart{pos: vert.len()});
+                                        // Don't push any verts until the line is drawn
+                                    } else if (cmd & 7) == 2 { // LineTo
+                                        for i in 0..(cmd >> 3) {
+                                            let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                            let px = cx + x;
+                                            let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                            let py = cy + y;
+
+                                            pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+
+                                            cx = px;
+                                            cy = py;
+                                        }
+                                    } else {
+                                        panic!("Unknown command");
+                                    }
+                                }
+                            }
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                            x => { reader.skip(x.wtype)?; },
+                        }
+                    }
+                }
+                x => { reader.skip(x.wtype)?; },
+            }
+        }
+        return Ok(LineGeom{
+            start,
+            data: vert,
+        });
+    }
+
+    fn read_poly_layer(mut reader: pbuf::Message) -> pbuf::Result<PolyGeom> {
+        let mut poly_start : Vec<LineStart> = vec![];
+        let mut polys : Vec<LineVert> = vec![];
+
+        while let Ok(field) = reader.next() {
+            match field {
+                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                    reader.enter_message()?;
+                    while let Ok(field) = reader.next() {
+                        match field {
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
+                                let geo_type = reader.read_var_int()?;
+                                assert!(geo_type == 3);
+                            },
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                                println!("POLY");
+                                let mut cx = 0.0;
+                                let mut cy = 0.0;
+                                let mut start_x = 0.0;
+                                let mut start_y = 0.0;
+                                let mut state = 0;
+                                let mut it = reader.read_packed_var_int()?;
+                                while let Some(cmd) = it.next() {
+                                    let cmd = cmd?;
+                                    if (cmd & 7) == 1 { // MoveTo
+                                        assert!(state == 0);
+                                        state = 1;
+                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                        cx += x as f32;
+                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                        cy += y as f32;
+
+                                        poly_start.push(LineStart{pos: polys.len()});
+                                        polys.push(LineVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                                        start_x = cx;
+                                        start_y = cy;
+                                    } else if (cmd & 7) == 2 { // LineTo
+                                        assert!(state == 1);
+                                        state = 2;
+                                        for _ in 0..(cmd >> 3) {
+                                            let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                            let px = cx + x;
+                                            let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                            let py = cy + y;
+
+                                            polys.push(LineVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+
+                                            cx = px;
+                                            cy = py;
+                                        }
+                                    } else if (cmd & 7) == 7 { // ClosePath
+                                        assert!(state == 2);
+                                        state = 0;
+                                        if cx == start_x && cy == start_y {
+                                            println!("Starting vertex is repeated. This is non-conforming, but we will patch the geometry");
+                                            polys.pop();
+                                        }
+                                    } else {
+                                        panic!("Unknown command");
+                                    }
+                                }
+                            }
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                            x => { reader.skip(x.wtype)?; },
+                        }
+                    }
+                }
+                x => { reader.skip(x.wtype)?; },
+            }
+        }
+
+        return Ok(PolyGeom{
+            start: poly_start,
+            data: polys,
+        })
+    }
+
+    let roads = if let Some(layer) = roads_layer {
+        read_line_layer(layer)?
+    } else {
+        LineGeom {
+            start: vec![],
+            data: vec![],
+        }
     };
 
-    return Ok(RawTile { roads, earth });
+    let earth = if let Some(layer) = earth_layer {
+        read_poly_layer(layer)?
+    } else {
+        PolyGeom {
+            start: vec![],
+            data: vec![],
+        }
+    };
+
+    let buildings = if let Some(layer) = buildings_layer {
+        read_poly_layer(layer)?
+    } else {
+        PolyGeom {
+            start: vec![],
+            data: vec![],
+        }
+    };
+
+    return Ok(RawTile { roads, earth, buildings });
 }
 
 pub mod pmtile {
@@ -823,6 +880,7 @@ pub mod pmtile {
     pub enum LayerType {
         Earth,
         Roads,
+        Buildings,
 
         SIZE,
     }
@@ -839,7 +897,7 @@ pub mod pmtile {
 
     impl Default for Layers {
         fn default() -> Self {
-            return [None, None].into();
+            return [None, None, None].into();
         }
     }
 
@@ -967,10 +1025,9 @@ pub mod pmtile {
             road_layer = Some(Layer{ vao, vbo, size: raw_tile.roads.data.len() });
         }
 
-        let earth_layer;
-        {
-            let poly_start = raw_tile.earth.start;
-            let polys = raw_tile.earth.data;
+        fn compile_polygon_layer(raw_tile: &crate::mapbox::PolyGeom) -> Layer {
+            let poly_start = &raw_tile.start;
+            let polys = &raw_tile.data;
 
             // Triangulate poly
             use crate::triangulate;
@@ -1071,12 +1128,15 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            earth_layer = Some(Layer{ vao, vbo, size: tri_polys.len() });
+            return Layer{ vao, vbo, size: tri_polys.len() };
         }
+        let earth_layer = Some(compile_polygon_layer(&raw_tile.earth));
+        let buildings_layer = Some(compile_polygon_layer(&raw_tile.buildings));
 
         let layers = [
             earth_layer,
             road_layer,
+            buildings_layer,
         ];
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -1146,6 +1206,7 @@ pub mod pmtile {
         let layers = [
             None,
             Some(Layer{ vao, vbo, size: verts.len() }),
+            None,
         ];
 
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };

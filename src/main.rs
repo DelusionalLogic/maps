@@ -551,7 +551,7 @@ fn main() {
 
         let camera_matrix = Mat4::translate(-viewport_pos.x, -viewport_pos.y).mul(&Mat4::scale_2d(scale as f64, scale as f64));
 
-        clear_color(Color(0.0, 0.2, 0.3, 1.0));
+        clear_color(Color(0.0, 0.1, 0.15, 1.0));
 
         unsafe {
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -627,6 +627,21 @@ fn main() {
 
                     gl::Uniform1f(shader_program.width, 12.0);
                     gl::Uniform4f(shader_program.fill_color, 0.1, 0.3, 0.4, 1.0);
+                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
+
+                    gl::BindVertexArray(0);
+                }
+            }
+
+            if let Some(layer) = &tile.layers[LayerType::Buildings] {
+                unsafe {
+                    gl::UseProgram(shader_program.program);
+
+                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                    gl::BindVertexArray(layer.vao);
+
+                    gl::Uniform1f(shader_program.width, 12.0);
+                    gl::Uniform4f(shader_program.fill_color, 0.0, 0.2, 0.3, 1.0);
                     gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
 
                     gl::BindVertexArray(0);
