@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 
-
 #[derive(Debug)]
 pub enum Error {
     InvalidPoly,
@@ -128,14 +127,14 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         for i in 0..vid.len()-1 {
             let next = i + 1;
             tris.add_edge(vid[i], vid[next])?;
-        if let Some(x) = validate_mesh(&tris) {
-            panic!("{:?}", x);
-        }
+        // if let Some(x) = validate_mesh(&tris) {
+        //     panic!("{:?}", x);
+        // }
         }
         tris.add_edge(*vid.last().unwrap(), *vid.first().unwrap())?;
-        if let Some(x) = validate_mesh(&tris) {
-            panic!("{:?}", x);
-        }
+        // if let Some(x) = validate_mesh(&tris) {
+        //     panic!("{:?}", x);
+        // }
 
         // Begin new poly
         vid.clear();
@@ -153,12 +152,15 @@ where P: Iterator<Item=(f64, f64)> + Clone,
             flush_tri(&mut tris, &mut vid)?;
             next_poly = polys.next();
         }
+        // if let Some(x) = validate_mesh(&tris) {
+        //     panic!("{:?}", x);
+        // }
         vid.push(
             tris.add_point(&Vector{x: p.0, y: p.1})?
         );
-        if let Some(x) = validate_mesh(&tris) {
-            panic!("{:?}", x);
-        }
+        // if let Some(x) = validate_mesh(&tris) {
+        //     panic!("{:?}", x);
+        // }
     }
     // Flush the final triangle
     flush_tri(&mut tris, &mut vid)?;
@@ -305,11 +307,9 @@ impl ActiveTriangulation {
     fn find_containg_tri(&self, p: &Vector, start_tri: Option<usize>) -> Result<(usize, TriangleLocation), Error> {
         let mut cursor = start_tri.unwrap_or(0);
 
-        let mut iter = 0;
-        loop {
-            assert!(iter < 1000);
-            iter += 1;
-
+        // After tris.len iterations we will have traversed every triangle, meaning we must be
+        // looping
+        for _ in 0..self.tris.len() {
             let tri = self.tris[cursor];
             let loc = locate_point_in_tri(
                 &self.verts[tri[0]],
@@ -317,19 +317,22 @@ impl ActiveTriangulation {
                 &self.verts[tri[2]],
                 p,
             );
+            // dbg!(cursor, tri, tri.iter().map(|x| self.verts[*x]).collect::<Vec<_>>(), &loc);
 
             // If the triangle is outside any edge we walk in that direction, otherwise we've found
             // it.
-            match loc {
+            cursor = match loc {
                 TriangleLocation::Outside(x) => {
-                    cursor = match self.opposing_tri(&TriSide{tri: cursor, side: x}) {
+                    match self.opposing_tri(&TriSide{tri: cursor, side: x}) {
                         None => return Err(Error::PointOutsideMesh),
                         Some(x) => x.tri,
-                    };
+                    }
                 }
                 loc => return Ok((cursor, loc)),
-            }
+            };
         }
+
+        return Err(Error::InternalAlgo);
     }
 
     fn opposing_tri(&self, side: &TriSide) -> Option<TriSide> {
@@ -731,17 +734,10 @@ impl ActiveTriangulation {
             self.inverse_tri[v2i] = TriSide{tri: x, side: 0};
         }
 
-        // Adjust the adjecencies of the tris touching the new ones
-        for (l, r) in upper_adj.iter().zip(&new_tri) {
-            if let Some(l) = l {
-                self.adj[l.tri][l.side as usize] = Some(*r);
-            }
-        }
 
-
-        dbg!(&upper);
         // Repair the adjecency information if the pseudo-poly contaied repeated verticies
         // (figure 7 in the paper)
+        let mut skip = vec![false; upper_adj.len()];
         for i in 2..upper.len() {
             if i == upper_end || i-2 == upper_end {
                 continue;
@@ -754,9 +750,23 @@ impl ActiveTriangulation {
                 println!("{} and {} share an edge", i, i-2);
                 let t1 = new_tri[i-1];
                 let t2 = new_tri[i];
+                // dbg!(t1, t2, self.tris[t1.tri], self.tris[t2.tri]);
 
                 self.adj[t1.tri][t1.side as usize] = Some(t2);
                 self.adj[t2.tri][t2.side as usize] = Some(t1);
+                skip[i-1] = true;
+                skip[i] = true;
+            }
+        }
+
+        // Adjust the adjecencies of the tris touching the new ones
+        for i in 0..upper_adj.len() {
+            if skip[i] { continue; }
+
+            let l = upper_adj[i];
+            let r = new_tri[i];
+            if let Some(l) = l {
+                self.adj[l.tri][l.side as usize] = Some(r);
             }
         }
 
@@ -959,40 +969,64 @@ impl TriangleLocation {
     }
 }
 
+struct LargestValue<U> {
+    current: f64,
+    pub val: U,
+}
+
+impl<U> LargestValue<U> {
+    fn minimum(initial: U) -> Self {
+        return LargestValue {
+            current: f64::NEG_INFINITY,
+            val: initial
+        };
+    }
+
+    fn present(&mut self, new: f64, value: U) {
+        if new > self.current {
+            self.current = new;
+            self.val = value;
+        }
+    }
+}
+
 fn locate_point_in_tri(p0: &Vector, p1: &Vector, p2: &Vector, p: &Vector) -> TriangleLocation {
     let mut on_edge = None;
 
-    if p0.x == p.x && p0.y == p.y {
-        return TriangleLocation::IsCorner(0);
-    }
+    let mut outside = LargestValue::minimum(None);
 
     let orient = orient2d(p0, p1, p);
     if orient == 0.0 {
         on_edge = Some(2);
     } else if orient > 0.0 {
-        return TriangleLocation::Outside(2);
-    }
-
-    if p1.x == p.x && p1.y == p.y {
-        return TriangleLocation::IsCorner(1);
+        outside.present(orient, Some(TriangleLocation::Outside(2)));
     }
 
     let orient = orient2d(p1, p2, p);
     if orient == 0.0 {
-        on_edge = Some(0);
+        on_edge = match on_edge {
+            None => Some(0),
+            Some(2) => return TriangleLocation::IsCorner(1),
+            _ => panic!(),
+        }
     } else if orient > 0.0 {
-        return TriangleLocation::Outside(0);
-    }
-
-    if p2.x == p.x && p2.y == p.y {
-        return TriangleLocation::IsCorner(2);
+        outside.present(orient, Some(TriangleLocation::Outside(0)));
     }
 
     let orient = orient2d(p2, p0, p);
     if orient == 0.0 {
-        on_edge = Some(1);
+        on_edge = match on_edge {
+            None => Some(1),
+            Some(2) => return TriangleLocation::IsCorner(0),
+            Some(0) => return TriangleLocation::IsCorner(2),
+            _ => panic!(),
+        }
     } else if orient > 0.0 {
-        return TriangleLocation::Outside(1);
+        outside.present(orient, Some(TriangleLocation::Outside(1)));
+    }
+
+    if let Some(x) = outside.val {
+        return x;
     }
 
     if let Some(x) = on_edge {

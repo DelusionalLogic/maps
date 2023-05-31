@@ -1,6 +1,8 @@
 pub mod pbuf {
     use std::io::Read;
 
+    use super::pmtile::BinarySlice;
+
     #[derive(Debug)]
     pub enum Error {
         EOF(),
@@ -74,69 +76,55 @@ pub mod pbuf {
         }
     }
 
-    struct BoundedRead<'a, T: Read> {
-        reader : &'a mut T,
-        pos: usize,
-    }
-
-    impl<'a, T: Read> BoundedRead<'a, T> {
-        pub fn new(reader: &'a mut T) -> Self {
-            return BoundedRead {
-                reader,
-                pos: 0,
-            }
-        }
-    }
-
-    impl <'a, T: Read> Read for BoundedRead<'a, T> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.reader.read(buf)?;
-            self.pos += n;
-
-            return Ok(n);
-        }
-    }
-
-    pub struct Message<'a, T: Read> {
-        reader: BoundedRead<'a, T>,
+    pub struct Message {
+        reader: BinarySlice,
         stack: Vec<usize>,
     }
 
-    pub struct PackedField<'a, 'b, X: Read, T> {
-        message: &'a mut Message<'b, X>,
-        fun: fn(&mut Message<'b, X>) -> T,
+    pub struct PackedField<'a, T> {
+        message: &'a mut Message,
+        fun: fn(&mut Message) -> T,
 
         end: usize,
     }
 
-    impl<'a, 'b, X: Read, T> Iterator for PackedField<'a, 'b, X, T> {
+    impl<'a, T> Iterator for PackedField<'a, T> {
         type Item = T;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.message.reader.pos == self.end {
+            if self.message.reader.cursor == self.end {
                 return None;
             }
-            debug_assert!(self.message.reader.pos < self.end);
+            debug_assert!(self.message.reader.cursor < self.end);
 
             return Some((self.fun)(self.message));
         }
     }
 
-    impl <'a, T: Read> Message<'a, T> {
-        pub fn new(reader: &'a mut T) -> Self {
+    impl Clone for Message {
+        fn clone(&self) -> Self {
+            return Message {
+                reader: self.reader.clone(),
+                stack: self.stack.clone(),
+            }
+        }
+    }
+
+    impl Message {
+        pub fn new(reader: BinarySlice) -> Self {
             return Self {
-                reader: BoundedRead::new(reader),
+                reader,
                 stack: vec![],
             }
         }
 
         pub fn next(&mut self) -> Result<TypeAndTag> {
             if let Some(x) = self.stack.last() {
-                if self.reader.pos == *x {
+                if self.reader.cursor == *x {
                     self.stack.pop();
                     return Ok(TypeAndTag::eom());
                 }
-                debug_assert!(self.reader.pos < *x);
+                debug_assert!(self.reader.cursor < *x);
             }
 
             let tat = TypeAndTag::parse(self.read_var_int()?);
@@ -174,9 +162,9 @@ pub mod pbuf {
             return Ok(value);
         }
 
-        pub fn read_packed_var_int<'b>(&'b mut self) -> Result<PackedField<'b, 'a, T, Result<u64>>> {
+        pub fn read_packed_var_int<'b>(&'b mut self) -> Result<PackedField<'b, Result<u64>>> {
             let len = self.read_var_int()?;
-            let pos = self.reader.pos;
+            let pos = self.reader.cursor;
             return Ok(PackedField {
                 message: self,
                 fun: Self::read_var_int,
@@ -196,13 +184,13 @@ pub mod pbuf {
                     panic!("Submessage length is longer than container");
                 }
             }
-            self.stack.push(len + self.reader.pos);
+            self.stack.push(len + self.reader.cursor);
             return Ok(());
         }
 
         pub fn exit_message(&mut self) -> Result<()> {
             if let Some(x) = self.stack.pop() {
-                self.fastforward(x - self.reader.pos)?;
+                self.fastforward(x - self.reader.cursor)?;
             } else {
                 panic!("Not in message");
             }
@@ -277,21 +265,20 @@ pub mod pbuf {
 
         #[test]
         fn bounded_reader_limit() {
-            let mut data = [0b00000001, 0b00000001].as_ref();
-            let mut reader = BoundedRead::new(&mut data);
+            let mut reader = BinarySlice::from_u8slice([0b00000001, 0b00000001], 0);
 
             let mut buf = [0; 1];
             reader.read(&mut buf).unwrap();
-            assert_eq!(reader.pos, 1);
+            assert_eq!(reader.cursor, 1);
 
             reader.read(&mut buf).unwrap();
-            assert_eq!(reader.pos, 2);
+            assert_eq!(reader.cursor, 2);
         }
 
         #[test]
         fn var_int_1() {
-            let mut data = [0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice([0b00000001], 0);
+            let mut msg = Message::new(data);
             let value = msg.read_var_int().unwrap();
 
             assert_eq!(value, 1);
@@ -299,8 +286,8 @@ pub mod pbuf {
 
         #[test]
         fn var_int_150() {
-            let mut data = [0b10010110, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice([0b10010110, 0b00000001], 0);
+            let mut msg = Message::new(data);
             let value = msg.read_var_int().unwrap();
 
             assert_eq!(value, 150);
@@ -308,8 +295,8 @@ pub mod pbuf {
 
         #[test]
         fn zig_0() {
-            let mut data = [0b00000000].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice([0b00000000], 0);
+            let mut msg = Message::new(data);
             let value = msg.read_zig().unwrap();
 
             assert_eq!(value, 0);
@@ -317,8 +304,8 @@ pub mod pbuf {
 
         #[test]
         fn zig_1() {
-            let mut data = [0b00000010].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice([0b00000010], 0);
+            let mut msg = Message::new(data);
             let value = msg.read_zig().unwrap();
 
             assert_eq!(value, 1);
@@ -326,8 +313,8 @@ pub mod pbuf {
 
         #[test]
         fn zig_neg1() {
-            let mut data = [0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice([0b00000001], 0);
+            let mut msg = Message::new(data);
             let value = msg.read_zig().unwrap();
 
             assert_eq!(value, -1);
@@ -335,8 +322,11 @@ pub mod pbuf {
 
         #[test]
         fn zig_max() {
-            let mut data = [0b11111110, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b11111110, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             let value = msg.read_zig().unwrap();
 
             assert_eq!(value, 0x7FFFFFFFFFFFFFFF);
@@ -344,8 +334,11 @@ pub mod pbuf {
 
         #[test]
         fn zig_neg_max() {
-            let mut data = [0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             let value = msg.read_zig().unwrap();
 
             assert_eq!(value, -0x8000000000000000);
@@ -353,8 +346,11 @@ pub mod pbuf {
 
         #[test]
         fn skip_i64() {
-            let mut data = [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             msg.skip(WireType::I64).unwrap();
             let value = msg.read_var_int().unwrap();
 
@@ -364,8 +360,11 @@ pub mod pbuf {
         #[test]
         #[ignore]
         fn skip_i64_eof() {
-            let mut data = [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             msg.skip(WireType::I64).unwrap();
             let value = msg.read_var_int().unwrap();
 
@@ -374,8 +373,11 @@ pub mod pbuf {
 
         #[test]
         fn skip_i32() {
-            let mut data = [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             msg.skip(WireType::I32).unwrap();
             let value = msg.read_var_int().unwrap();
 
@@ -384,8 +386,11 @@ pub mod pbuf {
 
         #[test]
         fn skip_len() {
-            let mut data = [0b00000001, 0b00000000, 0b00000001].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00000001, 0b00000000, 0b00000001],
+                0
+            );
+            let mut msg = Message::new(data);
             msg.skip(WireType::Len).unwrap();
             let value = msg.read_var_int().unwrap();
 
@@ -394,8 +399,11 @@ pub mod pbuf {
 
         #[test]
         fn field_1_varint() {
-            let mut data = [0b00001000, 0b00000000].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00001000, 0b00000000],
+                0
+            );
+            let mut msg = Message::new(data);
             let field = msg.next().unwrap();
 
             assert_eq!(field.wtype, WireType::VarInt);
@@ -404,8 +412,11 @@ pub mod pbuf {
 
         #[test]
         fn field_2_varint() {
-            let mut data = [0b00001000, 0b00000000, 0b00010000, 0b00000000].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00001000, 0b00000000, 0b00010000, 0b00000000],
+                0
+            );
+            let mut msg = Message::new(data);
 
             // skip first field
             let field = msg.next().unwrap();
@@ -419,8 +430,11 @@ pub mod pbuf {
 
         #[test]
         fn field_eof() {
-            let mut data = [].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [],
+                0
+            );
+            let mut msg = Message::new(data);
 
             let err = msg.next();
             assert!(matches!(err.unwrap_err(), Error::EOF()))
@@ -428,8 +442,11 @@ pub mod pbuf {
 
         #[test]
         fn submessage() {
-            let mut data = [0b00001010, 0b00000010, 0b00001000, 0b00000011].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00001010, 0b00000010, 0b00001000, 0b00000011],
+                0
+            );
+            let mut msg = Message::new(data);
 
             let field = msg.next().unwrap();
             assert_eq!(field.wtype, WireType::Len);
@@ -451,8 +468,11 @@ pub mod pbuf {
 
         #[test]
         fn skip_submessage() {
-            let mut data = [0b00001010, 0b00000010, 0b00001000, 0b00000011, 0b00010000, 0b00000000].as_ref();
-            let mut msg = Message::new(&mut data);
+            let data = BinarySlice::from_u8slice(
+                [0b00001010, 0b00000010, 0b00001000, 0b00000011, 0b00010000, 0b00000000],
+                0
+            );
+            let mut msg = Message::new(data);
 
             let field = msg.next().unwrap();
             assert_eq!(field.wtype, WireType::Len);
@@ -473,27 +493,7 @@ pub mod pbuf {
     }
 }
 
-use std::io::Read;
-
 #[derive(Clone,Copy,Debug)]
-pub struct Vector {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Vector {
-    pub fn new(x: f32, y: f32) -> Self {
-        return Vector { x, y };
-    }
-
-    pub fn unit(&mut self) {
-        let len = f32::sqrt(f32::powi(self.x, 2) + f32::powi(self.y, 2));
-        self.x /= len;
-        self.y /= len;
-    }
-}
-
-#[derive(Clone,Copy,Debug )]
 #[repr(packed)]
 pub struct LineVert {
     pub x: f32,
@@ -501,11 +501,6 @@ pub struct LineVert {
     pub norm_x: f32,
     pub norm_y: f32,
     pub sign: i8,
-}
-
-pub struct Normal {
-    pub x: f32,
-    pub y: f32,
 }
 
 #[derive(Debug)]
@@ -528,13 +523,12 @@ pub struct RawTile {
     pub earth: PolyGeom,
 }
 
-pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Result<RawTile> {
+pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
     let mut start = vec![];
     let mut vert : Vec<LineVert> = vec![];
     let mut poly_start : Vec<LineStart> = vec![];
     let mut polys : Vec<LineVert> = vec![];
 
-    println!("Reading!");
     while let Ok(field) = reader.next() {
         match field {
             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 3} => {
@@ -551,7 +545,7 @@ pub fn read_one_linestring<T: Read>(reader: &mut pbuf::Message<T>) -> pbuf::Resu
                             assert!(!seen_name);
                             let name = reader.read_string()?;
                             println!("Layer named {}", name);
-                            if name != "roads" && name != "buildings" {
+                            if name != "roads" && name != "earth" {
                                 reader.exit_message()?;
                                 break 'layer;
                             }
@@ -686,13 +680,14 @@ pub mod pmtile {
     use std::collections::HashSet;
     use std::io::Read;
     use std::io::Seek;
+    use std::rc::Rc;
     use flate2::bufread::GzDecoder;
     use super::pbuf;
     use core::ptr::NonNull;
 
-    struct BinarySlice {
-        data: Vec<u8>,
-        cursor: usize,
+    pub struct BinarySlice {
+        data: Rc<Vec<u8>>,
+        pub cursor: usize,
     }
 
     impl Read for BinarySlice {
@@ -706,19 +701,39 @@ pub mod pmtile {
         }
     }
 
+    impl Clone for BinarySlice {
+        fn clone(&self) -> Self {
+            return BinarySlice {
+                data: self.data.clone(),
+                cursor: self.cursor,
+            }
+        }
+    }
+
     impl BinarySlice {
+        pub fn from_u8slice<const N: usize>(read: [u8; N], start: usize) -> Self {
+
+            let data = read.to_vec();
+
+            return BinarySlice {
+                data: Rc::new(data),
+                cursor: start,
+            };
+        }
+
         pub fn from_read<T: Read + Seek>(read: &mut T, start: u64, len: usize) -> Self {
 
-            let mut slice = BinarySlice {
-                data: Vec::with_capacity(len),
-                cursor: 0,
-            };
+            let mut data = Vec::with_capacity(len);
 
             read.seek(std::io::SeekFrom::Start(start)).unwrap();
-            slice.data.resize(len, 0);
-            read.read_exact(&mut slice.data).unwrap();
+            data.resize(len, 0);
+            read.read_exact(&mut data).unwrap();
 
-            return slice;
+
+            return BinarySlice {
+                data: Rc::new(data),
+                cursor: 0,
+            };
         }
 
         pub fn from_read_decompress<T: Read + Seek>(read: &mut T, compression: &Compression, start: u64, len: usize) -> Self {
@@ -727,22 +742,22 @@ pub mod pmtile {
             buf.resize(len, 0);
             read.read_exact(&mut buf).unwrap();
 
-            let mut slice = BinarySlice {
-                data: Vec::new(),
-                cursor: 0,
-            };
+            let mut data = Vec::new();
 
             match compression {
                 Compression::GZip => {
                     let mut reader = GzDecoder::new(buf.as_slice());
-                    reader.read_to_end(&mut slice.data).unwrap();
+                    reader.read_to_end(&mut data).unwrap();
                 }
                 Compression::None => panic!(),
                 Compression::Brotli => panic!(),
                 Compression::Zstd => panic!(),
             }
 
-            return slice;
+            return BinarySlice {
+                data: Rc::new(data),
+                cursor: 0,
+            };
         }
 
         pub fn skip(&mut self, size: usize) {
@@ -922,7 +937,7 @@ pub mod pmtile {
         }
     }
 
-    fn compile_tile<T: Read>(x: u64, y: u64, z: u8, reader: &mut T) -> Result<Tile, String> {
+    fn compile_tile(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile, String> {
         let raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
         let road_layer;
@@ -1242,7 +1257,7 @@ pub mod pmtile {
     }
 
     #[derive(Debug)]
-    enum Compression {
+    pub enum Compression {
         None,
         GZip,
         Brotli,
@@ -1399,8 +1414,8 @@ pub mod pmtile {
                         }
                         assert!(eoffset + (elen as u64) < self.tile_len as u64);
 
-                        let mut tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
-                        return Some(compile_tile(x, y, level, &mut tile_slice).unwrap());
+                        let tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
+                        return Some(compile_tile(x, y, level, tile_slice).unwrap());
                     },
                     DEntry::Leaf(eoffset, elen) => {
                         assert!(eoffset + (elen as u64) < self.leaf_len as u64);
