@@ -618,50 +618,29 @@ fn main() {
 
             let tile_transform32: [f32; 16] = (&tile_transform).into();
 
-            if let Some(layer) = &tile.layers[LayerType::Earth] {
-                unsafe {
-                    gl::UseProgram(shader_program.program);
+            fn render_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, color: Color) {
+                if let Some(layer) = layer {
+                    unsafe {
+                        gl::UseProgram(shader_program.program);
 
-                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                    gl::BindVertexArray(layer.vao);
+                        gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                        gl::BindVertexArray(layer.vao);
 
-                    gl::Uniform1f(shader_program.width, 12.0);
-                    gl::Uniform4f(shader_program.fill_color, 0.1, 0.3, 0.4, 1.0);
-                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
+                        gl::Uniform1f(shader_program.width, 12.0);
+                        let Color(r, g, b, a) = color;
+                        gl::Uniform4f(shader_program.fill_color, r, g, b, a);
+                        gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
 
-                    gl::BindVertexArray(0);
+                        gl::BindVertexArray(0);
+                    }
                 }
             }
 
-            if let Some(layer) = &tile.layers[LayerType::Buildings] {
-                unsafe {
-                    gl::UseProgram(shader_program.program);
-
-                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                    gl::BindVertexArray(layer.vao);
-
-                    gl::Uniform1f(shader_program.width, 12.0);
-                    gl::Uniform4f(shader_program.fill_color, 0.0, 0.2, 0.3, 1.0);
-                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
-
-                    gl::BindVertexArray(0);
-                }
-            }
-
-            if let Some(layer) = &tile.layers[LayerType::Roads] {
-                unsafe {
-                    gl::UseProgram(shader_program.program);
-
-                    gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-                    gl::BindVertexArray(layer.vao);
-
-                    gl::Uniform1f(shader_program.width, 12.0);
-                    gl::Uniform4f(shader_program.fill_color, 1.0, 1.0, 1.0, 1.0);
-                    gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
-
-                    gl::BindVertexArray(0);
-                }
-            }
+            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Earth], Color(0.1, 0.3, 0.4, 1.0));
+            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Buildings], Color(0.0, 0.2, 0.3, 1.0));
+            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Water], Color(0.1, 0.2, 0.4, 1.0));
+            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Landuse], Color(0.0, 0.4, 0.2, 1.0));
+            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Roads], Color(1.0, 1.0, 1.0, 1.0));
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);

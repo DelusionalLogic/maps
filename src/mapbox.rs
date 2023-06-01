@@ -521,13 +521,17 @@ pub struct PolyGeom {
 pub struct RawTile {
     pub buildings: PolyGeom,
     pub earth: PolyGeom,
+    pub water: PolyGeom,
+    pub landuse: PolyGeom,
     pub roads: LineGeom,
 }
 
 pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
     let mut earth_layer = None;
     let mut buildings_layer = None;
+    let mut water_layer = None;
     let mut roads_layer = None;
+    let mut landuse_layer = None;
 
     while let Ok(field) = reader.next() {
         match field {
@@ -554,6 +558,8 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                     match name.as_str() {
                         "roads" => roads_layer = Some(layer_message),
                         "earth" => earth_layer = Some(layer_message),
+                        "water" => water_layer = Some(layer_message),
+                        "landuse" => landuse_layer = Some(layer_message),
                         "buildings" => buildings_layer = Some(layer_message),
                         _ => {},
                     }
@@ -728,7 +734,25 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     };
 
-    return Ok(RawTile { roads, earth, buildings });
+    let water = if let Some(layer) = water_layer {
+        read_poly_layer(layer)?
+    } else {
+        PolyGeom {
+            start: vec![],
+            data: vec![],
+        }
+    };
+
+    let landuse = if let Some(layer) = landuse_layer {
+        read_poly_layer(layer)?
+    } else {
+        PolyGeom {
+            start: vec![],
+            data: vec![],
+        }
+    };
+
+    return Ok(RawTile { roads, earth, buildings, water, landuse });
 }
 
 pub mod pmtile {
@@ -881,6 +905,8 @@ pub mod pmtile {
         Earth,
         Roads,
         Buildings,
+        Water,
+        Landuse,
 
         SIZE,
     }
@@ -897,7 +923,7 @@ pub mod pmtile {
 
     impl Default for Layers {
         fn default() -> Self {
-            return [None, None, None].into();
+            return [None, None, None, None, None].into();
         }
     }
 
@@ -1137,6 +1163,8 @@ pub mod pmtile {
             earth_layer,
             road_layer,
             buildings_layer,
+            Some(compile_polygon_layer(&raw_tile.water)),
+            Some(compile_polygon_layer(&raw_tile.landuse)),
         ];
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -1206,6 +1234,8 @@ pub mod pmtile {
         let layers = [
             None,
             Some(Layer{ vao, vbo, size: verts.len() }),
+            None,
+            None,
             None,
         ];
 
