@@ -111,7 +111,7 @@ fn build_adjecency(tris: &[[usize; 3]]) -> Vec<[Option<TriSide>; 3]> {
     return adj;
 }
 
-pub fn triangulate<S, P>(mut polys: S, points: P, expected_points: usize) -> Result<ActiveTriangulation, Error>
+pub fn triangulate<S, P>(mut polys: S, points: P, expected_points: usize) -> Result<(ActiveTriangulation, Vec<Option<usize>>), Error>
 where P: Iterator<Item=(f64, f64)> + Clone,
       S: Iterator<Item=usize> {
 
@@ -120,6 +120,12 @@ where P: Iterator<Item=(f64, f64)> + Clone,
     let mut tris = ActiveTriangulation::super_tri_of_bbox(&bbox, expected_points as _);
 
     let mut vid = Vec::with_capacity(expected_points);
+    let mut inverted_vid = Vec::with_capacity(expected_points);
+
+    // the super tri
+    inverted_vid.push(None);
+    inverted_vid.push(None);
+    inverted_vid.push(None);
 
     fn flush_tri(tris: &mut ActiveTriangulation, vid: &mut Vec<usize>) -> Result<(), Error> {
         if vid.len() < 3 { return Err(Error::InvalidPoly); }
@@ -155,8 +161,14 @@ where P: Iterator<Item=(f64, f64)> + Clone,
         // if let Some(x) = validate_mesh(&tris) {
         //     panic!("{:?}", x);
         // }
+        let new_vertx = tris.add_point(&Vector{x: p.0, y: p.1})?;
+        if inverted_vid.len() == new_vertx  {
+            inverted_vid.push(Some(i));
+            assert_eq!(inverted_vid.len()-1, new_vertx);
+        }
+        assert_eq!(tris.verts.len(), inverted_vid.len());
         vid.push(
-            tris.add_point(&Vector{x: p.0, y: p.1})?
+            new_vertx
         );
         // if let Some(x) = validate_mesh(&tris) {
         //     panic!("{:?}", x);
@@ -165,7 +177,7 @@ where P: Iterator<Item=(f64, f64)> + Clone,
     // Flush the final triangle
     flush_tri(&mut tris, &mut vid)?;
 
-    return Ok(tris);
+    return Ok((tris, inverted_vid));
 }
 
 impl ActiveTriangulation {

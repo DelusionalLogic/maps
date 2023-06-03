@@ -46,6 +46,15 @@ impl <T> Vector2<T>
 }
 
 impl <T> Vector2<T>
+    where T: std::ops::MulAssign<T> + Copy {
+
+    pub fn mulf(&mut self, val: T) {
+        self.x *= val;
+        self.y *= val;
+    }
+}
+
+impl <T> Vector2<T>
     where T: std::ops::AddAssign<T> + Copy {
 
     pub fn addv2(&mut self, other: &Vector2<T>) {
@@ -78,6 +87,14 @@ impl <T> Vector2<T>
 
     pub fn cross(&self, other: &Self) -> T {
         return self.x * other.y - self.y * other.x;
+    }
+}
+
+impl <T> Vector2<T>
+    where T: std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
+
+    pub fn dot(&self, other: &Self) -> T {
+        return self.x * other.x + self.y * other.y;
     }
 }
 

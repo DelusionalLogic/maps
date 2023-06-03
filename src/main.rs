@@ -14,8 +14,6 @@ use glfw;
 use glfw::Context;
 use gl;
 
-use crate::mapbox::pmtile::LayerType;
-
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
@@ -388,6 +386,7 @@ fn main() {
 
 
             color = fill_color;
+            color = mix(color, vec4(1, 1, 1, 1), dist);
 
 
             { // Border
@@ -426,7 +425,7 @@ fn main() {
         [0].iter().copied(),
         [(100.0, 100.0), (100.0, 200.0), (200.0, 200.0), (200.0, 100.0)].iter().copied(),
         4,
-    ).unwrap();
+    ).unwrap().0;
 
     let mut vertecies : Vec<f32> = Vec::with_capacity(5 * 3 * tris.tris.len());
     for tri in tris.tris {
@@ -618,7 +617,7 @@ fn main() {
 
             let tile_transform32: [f32; 16] = (&tile_transform).into();
 
-            fn render_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, color: Color) {
+            fn render_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, color: Color, width: f32) {
                 if let Some(layer) = layer {
                     unsafe {
                         gl::UseProgram(shader_program.program);
@@ -626,7 +625,7 @@ fn main() {
                         gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
                         gl::BindVertexArray(layer.vao);
 
-                        gl::Uniform1f(shader_program.width, 12.0);
+                        gl::Uniform1f(shader_program.width, width);
                         let Color(r, g, b, a) = color;
                         gl::Uniform4f(shader_program.fill_color, r, g, b, a);
                         gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
@@ -636,11 +635,12 @@ fn main() {
                 }
             }
 
-            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Earth], Color(0.1, 0.3, 0.4, 1.0));
-            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Buildings], Color(0.0, 0.2, 0.3, 1.0));
-            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Water], Color(0.1, 0.2, 0.4, 1.0));
-            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Landuse], Color(0.0, 0.4, 0.2, 1.0));
-            render_poly(&shader_program, &tile_transform32, &tile.layers[LayerType::Roads], Color(1.0, 1.0, 1.0, 1.0));
+            render_poly(&shader_program, &tile_transform32, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.3, 0.4, 0.5, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.landuse, Color(0.0, 0.4, 0.2, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.1, 0.2, 0.4, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(1.0, 1.0, 1.0, 1.0), 12.0);
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);

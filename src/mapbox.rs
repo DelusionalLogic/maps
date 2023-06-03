@@ -503,7 +503,7 @@ pub struct LineVert {
     pub sign: i8,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct LineStart {
     pos: usize,
 }
@@ -513,6 +513,7 @@ pub struct LineGeom {
     data: Vec<LineVert>,
 }
 
+#[derive(Clone)]
 pub struct PolyGeom {
     start: Vec<LineStart>,
     data: Vec<LineVert>,
@@ -901,16 +902,6 @@ pub mod pmtile {
         return (acc + d) as u64;
     }
 
-    pub enum LayerType {
-        Earth,
-        Roads,
-        Buildings,
-        Water,
-        Landuse,
-
-        SIZE,
-    }
-
     pub struct Layer {
         pub vao: u32,
         pub vbo: u32,
@@ -918,28 +909,36 @@ pub mod pmtile {
     }
 
     pub struct Layers {
-        data: [Option<Layer>; LayerType::SIZE as usize],
+        pub earth: Option<Layer>,
+        pub roads: Option<Layer>,
+        pub buildings: Option<Layer>,
+        pub water: Option<Layer>,
+        pub landuse: Option<Layer>,
     }
 
     impl Default for Layers {
         fn default() -> Self {
-            return [None, None, None, None, None].into();
+            return Layers {
+                earth: None,
+                roads: None,
+                buildings: None,
+                water: None,
+                landuse: None
+            }
         }
     }
 
-    impl From<[Option<Layer>; LayerType::SIZE as usize]> for Layers {
-        fn from(data: [Option<Layer>; LayerType::SIZE as usize]) -> Self {
+    impl From<[Option<Layer>; 5]> for Layers {
+        fn from(data: [Option<Layer>; 5]) -> Self {
+            let [earth, roads, buildings, water, landuse] = data;
             return Layers{
-                data,
+                earth,
+                roads,
+                buildings,
+                water,
+                landuse,
+                ..Default::default()
             };
-        }
-    }
-
-    impl std::ops::Index<LayerType> for Layers {
-        type Output = Option<Layer>;
-
-        fn index(&self, index: LayerType) -> &Self::Output {
-            return &self.data[index as usize];
         }
     }
 
@@ -953,15 +952,11 @@ pub mod pmtile {
         pub layers: Layers,
     }
 
-    impl Drop for Tile {
+    impl Drop for Layer {
         fn drop(&mut self) {
-            for layer in &self.layers.data {
-                if let Some(layer) = layer {
-                    unsafe {
-                        gl::DeleteVertexArrays(1, &layer.vao);
-                        gl::DeleteBuffers(1, &layer.vbo);
-                    }
-                }
+            unsafe {
+                gl::DeleteVertexArrays(1, &self.vao);
+                gl::DeleteBuffers(1, &self.vbo);
             }
         }
     }
@@ -1022,10 +1017,9 @@ pub mod pmtile {
     }
 
     fn compile_tile(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile, String> {
-        let raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
+        let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
-        let road_layer;
-        {
+        fn compile_line_layer(raw_tile: &crate::mapbox::LineGeom) -> Layer {
             let mut vao = 0;
             unsafe { gl::GenVertexArrays(1, &mut vao) };
 
@@ -1036,7 +1030,7 @@ pub mod pmtile {
                 gl::BindVertexArray(vao);
 
                 gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (raw_tile.roads.data.len() * std::mem::size_of::<super::LineVert>()) as _, raw_tile.roads.data.as_ptr().cast(), gl::STATIC_DRAW);
+                gl::BufferData(gl::ARRAY_BUFFER, (raw_tile.data.len() * std::mem::size_of::<super::LineVert>()) as _, raw_tile.data.as_ptr().cast(), gl::STATIC_DRAW);
 
                 gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
                 gl::EnableVertexAttribArray(0);
@@ -1048,21 +1042,86 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            road_layer = Some(Layer{ vao, vbo, size: raw_tile.roads.data.len() });
+            return Layer{ vao, vbo, size: raw_tile.data.len() };
         }
 
-        fn compile_polygon_layer(raw_tile: &crate::mapbox::PolyGeom) -> Layer {
+        fn polygon_area_two(polys: &[crate::mapbox::LineVert]) -> f32 {
+            let start = 0;
+            let end = polys.len();
+
+            let mut area = 0.0;
+            for i in start..end-1 {
+                area += polys[i].x*polys[i+1].y - polys[i].y*polys[i+1].x;
+            }
+            area += polys[end-1].x*polys[start].y - polys[end-1].y*polys[start].x;
+
+            return area;
+        }
+
+        fn compile_polygon_layer(raw_tile: &mut crate::mapbox::PolyGeom) -> Layer {
             let poly_start = &raw_tile.start;
-            let polys = &raw_tile.data;
+            let polys = &mut raw_tile.data;
+            let mut tri_polys : Vec<super::LineVert> = vec![];
 
             // Triangulate poly
             use crate::triangulate;
 
+            // @HACK: This normal calculation is bad and halfbaked. I'm leaving it in for now, but
+            // the first sign of problems and i'm gutting it.
+            let mut normals = Vec::with_capacity(polys.len());
+            for i in 0..poly_start.len() {
+                let start = poly_start[i].pos;
+                let end = if i < poly_start.len()-1 {
+                    poly_start[i+1].pos
+                } else {
+                    polys.len()
+                };
+
+                for j in start..end {
+                    let prev = if j == start {
+                        polys[end-1]
+                    } else {
+                        polys[j-1]
+                    };
+                    let current = polys[j];
+                    let next = if j == end-1 {
+                        polys[start]
+                    } else {
+                        polys[j+1]
+                    };
+
+                    let prev = Vector2::new(prev.x, prev.y);
+                    let current = Vector2::new(current.x, current.y);
+                    let mut next = Vector2::new(next.x, next.y);
+
+                    let mut into = current.clone();
+                    into.subv2(&prev);
+
+                    next.subv2(&current);
+
+                    into.unit();
+                    next.unit();
+
+                    into.normal();
+                    next.normal();
+
+                    into.addv2(&next);
+                    into.unit();
+
+                    let cos_angle = into.dot(&next);
+                    let l = 1.0 / cos_angle;
+
+                    into.mulf(l);
+
+                    normals.push(into);
+                }
+            }
+            assert!(normals.len() == polys.len());
+
             let mut multipoly_start = Vec::with_capacity(poly_start.len());
             // Find the clockwise polygons
             if !poly_start.is_empty() {
-                multipoly_start.push(0);
-                for i in 1..poly_start.len() {
+                for i in 0..poly_start.len() {
                     let start = poly_start[i].pos;
                     let end = if i < poly_start.len()-1 {
                         poly_start[i+1].pos
@@ -1070,20 +1129,17 @@ pub mod pmtile {
                         polys.len()
                     };
 
-                    let mut area = 0.0;
-                    for j in start..end-1 {
-                        area += polys[j].x*polys[j+1].y - polys[j].y*polys[j+1].x;
-                    }
-                    area += polys[end-1].x*polys[start].y - polys[end-1].y*polys[start].x;
-
+                    let area = polygon_area_two(&polys[start..end]);
                     if area.is_sign_positive() {
                         multipoly_start.push(i);
                     }
+
+                    polys[start..end].reverse();
+                    normals[start..end].reverse();
                 }
             }
 
             let mut offset = 0;
-            let mut tri_polys : Vec<super::LineVert> = vec![];
             for i in 0..multipoly_start.len() {
                 let multipoly = multipoly_start[i];
                 let polys_start = poly_start[multipoly].pos;
@@ -1095,39 +1151,28 @@ pub mod pmtile {
                     poly_start[multipoly_start[i+1]].pos
                 };
 
-                // The external polygons is clockwise, we need to reverse it. To do so we want to
-                // find the end index of its verticies.
-                let polys_extern_end = if poly_start.len() > multipoly+1 {
-                    poly_start[multipoly+1].pos
-                } else {
-                    polys.len()
-                };
-
-
-                let point_it = polys[polys_start..polys_extern_end].iter().rev()
-                    .chain(polys[polys_extern_end..polys_end].iter())
+                let point_it = polys[polys_start..polys_end].iter()
                     .map(|i| (i.x as f64, i.y as f64));
+                let normals = &normals[polys_start..polys_end];
 
-                let triangulation = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys.len()).unwrap()
+                let (tris, vid) = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys.len()).unwrap();
+                let triangulation = tris
                     .trim().unwrap();
 
                 for tri in &triangulation.tris {
                     let p1 = triangulation.verts[tri[0]];
                     let p2 = triangulation.verts[tri[1]];
                     let p3 = triangulation.verts[tri[2]];
+                    // @HACK: We know that verts are added in the order we pass them and that they
+                    // are never reordered. That's supposed to be an implementation detail, but
+                    // ends up important here
+                    let n1 = normals[vid[tri[0]].unwrap()];
+                    let n2 = normals[vid[tri[1]].unwrap()];
+                    let n3 = normals[vid[tri[2]].unwrap()];
 
-                    // if triangulation.is_fixed(tri[0], tri[1]) {
-                        // add_point(&mut tri_polys, Vector2 { x: p1.x as _, y: p1.y as _ },  Vector2 { x: p2.x as _, y: p2.y as _ }, false, true);
-                    // }
-                    // if triangulation.is_fixed(tri[1], tri[2]) {
-                        // add_point(&mut tri_polys, Vector2 { x: p2.x as _, y: p2.y as _ },  Vector2 { x: p3.x as _, y: p3.y as _ }, false, true);
-                    // }
-                    // if triangulation.is_fixed(tri[2], tri[0]) {
-                        // add_point(&mut tri_polys, Vector2 { x: p3.x as _, y: p3.y as _ },  Vector2 { x: p1.x as _, y: p1.y as _ }, false, true);
-                    // }
-                    tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
-                    tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
-                    tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x:  0.0, norm_y:  0.0, sign: 1 });
+                    tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x: n1.x, norm_y: n1.y, sign: 0 });
+                    tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x: n2.x, norm_y: n2.y, sign: 0 });
+                    tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x: n3.x, norm_y: n3.y, sign: 0 });
                 }
                 offset += polys_end - polys_start;
             }
@@ -1156,16 +1201,14 @@ pub mod pmtile {
             }
             return Layer{ vao, vbo, size: tri_polys.len() };
         }
-        let earth_layer = Some(compile_polygon_layer(&raw_tile.earth));
-        let buildings_layer = Some(compile_polygon_layer(&raw_tile.buildings));
 
-        let layers = [
-            earth_layer,
-            road_layer,
-            buildings_layer,
-            Some(compile_polygon_layer(&raw_tile.water)),
-            Some(compile_polygon_layer(&raw_tile.landuse)),
-        ];
+        let layers = Layers{
+            earth: Some(compile_polygon_layer(&mut raw_tile.earth)),
+            roads: Some(compile_line_layer(&raw_tile.roads)),
+            buildings: Some(compile_polygon_layer(&mut raw_tile.buildings)),
+            water: Some(compile_polygon_layer(&mut raw_tile.water)),
+            landuse: Some(compile_polygon_layer(&mut raw_tile.landuse)),
+        };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
@@ -1231,13 +1274,10 @@ pub mod pmtile {
             gl::BindVertexArray(0);
         }
 
-        let layers = [
-            None,
-            Some(Layer{ vao, vbo, size: verts.len() }),
-            None,
-            None,
-            None,
-        ];
+        let layers = Layers{
+            roads: Some(Layer{ vao, vbo, size: verts.len() }),
+            ..Default::default()
+        };
 
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
         return Tile{
