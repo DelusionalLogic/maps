@@ -525,6 +525,10 @@ pub struct RawTile {
     pub water: PolyGeom,
     pub landuse: PolyGeom,
     pub roads: LineGeom,
+    pub highways: LineGeom,
+    pub major: LineGeom,
+    pub medium: LineGeom,
+    pub minor: LineGeom,
 }
 
 pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
@@ -555,7 +559,6 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                 }
 
                 if let Some(name) = name {
-                    println!("Layer named {}", name);
                     match name.as_str() {
                         "roads" => roads_layer = Some(layer_message),
                         "earth" => earth_layer = Some(layer_message),
@@ -569,6 +572,163 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
             x => { reader.skip(x.wtype)?; },
         }
     }
+
+    fn read_road_layer(mut reader: pbuf::Message) -> pbuf::Result<(LineGeom, LineGeom, LineGeom, LineGeom, LineGeom)> {
+        // Since the ordering of the fields in the "messages" aren't well defined this end up being
+        // way more difficult than it really should be. First we find the key and value indexes of
+        // the keys/values we care about, then we have to do a double pass on all the features
+        // first segment them according to the tags, and then read them out in the second pass.
+        let mut key_id = None;
+        let mut highway_value_id = None;
+        let mut major_value_id = None;
+        let mut medium_value_id = None;
+        let mut minor_value_id = None;
+
+        {
+            let mut key_count = 0;
+            let mut value_count = 0;
+            let mut reader = reader.clone();
+            while let Ok(field) = reader.next() {
+                match field {
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 3} => {
+                        match reader.read_string()?.as_str() {
+                            "pmap:kind" => key_id = Some(key_count),
+                            _ => {},
+                        }
+                        key_count += 1;
+                    }
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                        reader.enter_message()?;
+                        while let Ok(field) = reader.next() {
+                            match field {
+                                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
+                                    match reader.read_string()?.as_str() {
+                                        "highway" => highway_value_id = Some(value_count),
+                                        "major_road" => major_value_id = Some(value_count),
+                                        "medium_road" => medium_value_id = Some(value_count),
+                                        "minor_road" => minor_value_id = Some(value_count),
+                                        _ => {},
+                                    }
+                                }
+                                x => { reader.skip(x.wtype)?; },
+                            }
+                        }
+                        value_count += 1;
+                    },
+                    x => { reader.skip(x.wtype)?; },
+                }
+            }
+        }
+
+        // @SPEED: There may be some way to read the buffer linearly here instead of fucking up the
+        // ordering. This is fine for now.
+        let mut highway_features = vec![];
+        let mut major_features = vec![];
+        let mut medium_features = vec![];
+        let mut minor_features = vec![];
+        let mut other_features = vec![];
+
+        {
+            while let Ok(field) = reader.next() {
+                match field {
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                        reader.enter_message()?;
+                        let feature_ptr = reader.clone();
+                        let mut bucket = &mut other_features;
+                        while let Ok(field) = reader.next() {
+                            match field {
+                                pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
+                                    let geo_type = reader.read_var_int()?;
+                                    assert!(geo_type == 2);
+                                },
+                                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                                    let mut it = reader.read_packed_var_int()?;
+                                    while let Some(tag) = it.next() {
+                                        let key = tag?;
+                                        let value = it.next().unwrap()?;
+
+                                        if Some(key) == key_id {
+                                            if Some(value) == highway_value_id {
+                                                bucket = &mut highway_features;
+                                            } else if Some(value) == major_value_id {
+                                                bucket = &mut major_features;
+                                            } else if Some(value) == medium_value_id {
+                                                bucket = &mut medium_features;
+                                            } else if Some(value) == minor_value_id {
+                                                bucket = &mut minor_features;
+                                            }
+                                        }
+                                    }
+                                },
+                                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                                x => { reader.skip(x.wtype)?; },
+                            }
+                        }
+                        bucket.push(feature_ptr);
+                    }
+                    x => { reader.skip(x.wtype)?; },
+                }
+            }
+        }
+
+        fn read_geometry(features: Vec<pbuf::Message>) -> pbuf::Result<LineGeom> {
+            let mut start = vec![];
+            let mut vert : Vec<LineVert> = vec![];
+
+            for mut reader in features {
+                while let Ok(field) = reader.next() {
+                    match field {
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                            let mut cx = 0.0;
+                            let mut cy = 0.0;
+                            let mut it = reader.read_packed_var_int()?;
+                            while let Some(cmd) = it.next() {
+                                let cmd = cmd?;
+                                if (cmd & 7) == 1 { // MoveTo
+                                    let x = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                    cx += x as f32;
+                                    let y = pbuf::decode_zig(it.next().unwrap().unwrap());
+                                    cy += y as f32;
+
+                                    start.push(LineStart{pos: vert.len()});
+                                    // Don't push any verts until the line is drawn
+                                } else if (cmd & 7) == 2 { // LineTo
+                                    for i in 0..(cmd >> 3) {
+                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                        let px = cx + x;
+                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                        let py = cy + y;
+
+                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+
+                                        cx = px;
+                                        cy = py;
+                                    }
+                                } else {
+                                    panic!("Unknown command");
+                                }
+                            }
+                        }
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                        x => { reader.skip(x.wtype)?; },
+                    }
+                }
+            }
+            return Ok(LineGeom { start, data: vert });
+        }
+
+        return Ok((
+            read_geometry(other_features)?,
+            read_geometry(highway_features)?,
+            read_geometry(major_features)?,
+            read_geometry(medium_features)?,
+            read_geometry(minor_features)?,
+        ));
+    }
+
 
     fn read_line_layer(mut reader: pbuf::Message) -> pbuf::Result<LineGeom> {
         let mut start = vec![];
@@ -646,7 +806,6 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                 assert!(geo_type == 3);
                             },
                             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
-                                println!("POLY");
                                 let mut cx = 0.0;
                                 let mut cy = 0.0;
                                 let mut start_x = 0.0;
@@ -685,7 +844,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         assert!(state == 2);
                                         state = 0;
                                         if cx == start_x && cy == start_y {
-                                            println!("Starting vertex is repeated. This is non-conforming, but we will patch the geometry");
+                                            // println!("Starting vertex is repeated. This is non-conforming, but we will patch the geometry");
                                             polys.pop();
                                         }
                                     } else {
@@ -708,13 +867,16 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         })
     }
 
-    let roads = if let Some(layer) = roads_layer {
-        read_line_layer(layer)?
+    let (roads, highways, major, medium, minor) = if let Some(layer) = roads_layer {
+        read_road_layer(layer)?
     } else {
-        LineGeom {
-            start: vec![],
-            data: vec![],
-        }
+        (
+            LineGeom { start: vec![], data: vec![] },
+            LineGeom { start: vec![], data: vec![] },
+            LineGeom { start: vec![], data: vec![] },
+            LineGeom { start: vec![], data: vec![] },
+            LineGeom { start: vec![], data: vec![] },
+        )
     };
 
     let earth = if let Some(layer) = earth_layer {
@@ -753,7 +915,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     };
 
-    return Ok(RawTile { roads, earth, buildings, water, landuse });
+    return Ok(RawTile { roads, highways, major, medium, minor, earth, buildings, water, landuse });
 }
 
 pub mod pmtile {
@@ -911,6 +1073,10 @@ pub mod pmtile {
     pub struct Layers {
         pub earth: Option<Layer>,
         pub roads: Option<Layer>,
+        pub highways: Option<Layer>,
+        pub major: Option<Layer>,
+        pub medium: Option<Layer>,
+        pub minor: Option<Layer>,
         pub buildings: Option<Layer>,
         pub water: Option<Layer>,
         pub landuse: Option<Layer>,
@@ -922,6 +1088,10 @@ pub mod pmtile {
                 earth: None,
                 roads: None,
                 buildings: None,
+                highways: None,
+                major: None,
+                medium: None,
+                minor: None,
                 water: None,
                 landuse: None
             }
@@ -1205,6 +1375,10 @@ pub mod pmtile {
         let layers = Layers{
             earth: Some(compile_polygon_layer(&mut raw_tile.earth)),
             roads: Some(compile_line_layer(&raw_tile.roads)),
+            highways: Some(compile_line_layer(&raw_tile.highways)),
+            major: Some(compile_line_layer(&raw_tile.major)),
+            medium: Some(compile_line_layer(&raw_tile.medium)),
+            minor: Some(compile_line_layer(&raw_tile.minor)),
             buildings: Some(compile_polygon_layer(&mut raw_tile.buildings)),
             water: Some(compile_polygon_layer(&mut raw_tile.water)),
             landuse: Some(compile_polygon_layer(&mut raw_tile.landuse)),

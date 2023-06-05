@@ -386,7 +386,6 @@ fn main() {
 
 
             color = fill_color;
-            color = mix(color, vec4(1, 1, 1, 1), dist);
 
 
             { // Border
@@ -395,10 +394,10 @@ fn main() {
                 // color = mix(color, border_color, ffactor);
             }
 
-            // float invdist = 1-dist;
-            // float grad = fwidth(invdist);
-            // float ffactor = clamp(invdist/(feather*grad), 0, 1);
-            // color *= ffactor;
+            float invdist = 1-dist;
+            float grad = fwidth(invdist);
+            float ffactor = clamp(invdist/(feather*grad), 0, 1);
+            color *= ffactor;
 
             // color = mix(edge_color, color, edge_factor());
             // color = vec4(.9, .9, .9, 1.0);
@@ -607,7 +606,9 @@ fn main() {
 
                 unsafe {
                     gl::Enable(gl::SCISSOR_TEST);
-                    gl::Scissor(v1.x as i32, v1.y as i32, v2.x as i32, v2.y as i32);
+                    // Allow a one pixel overlap between tiles to reduce the screen door when
+                    // rounding goes poorly
+                    gl::Scissor(v1.x as i32, v1.y as i32, v2.x as i32 +1, v2.y as i32 +1);
                 }
             }
 
@@ -640,7 +641,13 @@ fn main() {
             render_poly(&shader_program, &tile_transform32, &tile.layers.landuse, Color(0.0, 0.4, 0.2, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.1, 0.2, 0.4, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(1.0, 1.0, 1.0, 1.0), 12.0);
+
+            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(1.0, 1.0, 1.0, 1.0), 4.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.0, 1.0, 0.93, 1.0), 5.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.0, 1.0, 0.93, 1.0), 6.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.0, 1.0, 0.93, 1.0), 8.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.0, 1.0, 0.93, 1.0), 14.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.0, 0.7, 0.65, 1.0), 10.0);
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
