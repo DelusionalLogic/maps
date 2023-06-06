@@ -530,7 +530,8 @@ pub struct RawTile {
     pub buildings: PolyGeom,
     pub earth: PolyGeom,
     pub water: PolyGeom,
-    pub landuse: PolyGeom,
+    pub areas: PolyGeom,
+    pub farmland: PolyGeom,
 
     pub roads: LineGeom,
     pub highways: LineGeom,
@@ -836,29 +837,37 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         });
     }
 
-    fn read_landuse_layer(reader: &mut pbuf::Message) -> pbuf::Result<(PolyGeom, PolyGeom)> {
-        let key_id;
-
+    fn read_landuse_layer(reader: &mut pbuf::Message) -> pbuf::Result<(PolyGeom, PolyGeom, PolyGeom)> {
+        let key_ids;
         let value_ids;
+
         {
-            let (key_ids, value_idsx) = scan_for_keys_and_values(
+            let (key_idsx, value_idsx) = scan_for_keys_and_values(
                 &mut reader.clone(),
-                &vec!["landuse"],
-                &vec!["farmland"],
+                &vec!["landuse", "amenity", "place", "landuse"],
+                &vec!["farmland", "university", "neighbourhood", "residential"],
             )?;
 
-            key_id = key_ids[0];
+            key_ids = key_idsx;
             value_ids = value_idsx;
         }
 
         // @SPEED: There may be some way to read the buffer linearly here instead of fucking up the
         // ordering. This is fine for now.
+        let groups = [
+            0,
+            1,
+            1,
+            1,
+        ];
         let mut other_features = vec![];
         let mut features = vec![];
-        for _ in 0..value_ids.len() {
+        for _ in 0..2 {
             features.push(vec![]);
         }
 
+        assert!(key_ids.len() == value_ids.len());
+        assert!(key_ids.len() == groups.len());
         {
             while let Ok(field) = reader.next() {
                 match field {
@@ -879,11 +888,10 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let key = tag?;
                                         let value = it.next().unwrap()?;
 
-                                        if Some(key) == key_id {
-                                            for (i, hey) in value_ids.iter().enumerate() {
-                                                if *hey == Some(value) {
-                                                    bucket = &mut features[i];
-                                                }
+                                        for i in 0..key_ids.len() {
+                                            if key_ids[i] == Some(key) && value_ids[i] == Some(value) {
+                                                let group = groups[i];
+                                                bucket = &mut features[group];
                                             }
                                         }
                                     }
@@ -965,6 +973,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         return Ok((
             read_geometry(&mut other_features)?,
             read_geometry(&mut features[0])?,
+            read_geometry(&mut features[1])?,
         ));
     }
 
@@ -1086,16 +1095,17 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     };
 
-    let (landuse, farmland) = if let Some(layer) = &mut layer_messages[3] {
+    let (landuse, farmland, areas) = if let Some(layer) = &mut layer_messages[3] {
         read_landuse_layer(layer)?
     } else {
         (
             PolyGeom { start: vec![], data: vec![] },
             PolyGeom { start: vec![], data: vec![] },
+            PolyGeom { start: vec![], data: vec![] },
         )
     };
 
-    return Ok(RawTile { roads, highways, major, medium, minor, earth, buildings, water, landuse: farmland });
+    return Ok(RawTile { roads, highways, major, medium, minor, earth, buildings, water, farmland, areas });
 }
 
 pub mod pmtile {
@@ -1259,7 +1269,8 @@ pub mod pmtile {
         pub minor: Option<Layer>,
         pub buildings: Option<Layer>,
         pub water: Option<Layer>,
-        pub landuse: Option<Layer>,
+        pub farmland: Option<Layer>,
+        pub areas: Option<Layer>,
     }
 
     impl Default for Layers {
@@ -1273,22 +1284,9 @@ pub mod pmtile {
                 medium: None,
                 minor: None,
                 water: None,
-                landuse: None
+                farmland: None,
+                areas: None,
             }
-        }
-    }
-
-    impl From<[Option<Layer>; 5]> for Layers {
-        fn from(data: [Option<Layer>; 5]) -> Self {
-            let [earth, roads, buildings, water, landuse] = data;
-            return Layers{
-                earth,
-                roads,
-                buildings,
-                water,
-                landuse,
-                ..Default::default()
-            };
         }
     }
 
@@ -1561,7 +1559,8 @@ pub mod pmtile {
             minor: Some(compile_line_layer(&raw_tile.minor)),
             buildings: Some(compile_polygon_layer(&mut raw_tile.buildings)),
             water: Some(compile_polygon_layer(&mut raw_tile.water)),
-            landuse: Some(compile_polygon_layer(&mut raw_tile.landuse)),
+            farmland: Some(compile_polygon_layer(&mut raw_tile.farmland)),
+            areas: Some(compile_polygon_layer(&mut raw_tile.areas)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file

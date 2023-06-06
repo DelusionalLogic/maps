@@ -637,17 +637,17 @@ fn main() {
             }
 
             render_poly(&shader_program, &tile_transform32, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.3, 0.4, 0.5, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.landuse, Color(0.0, 0.4, 0.2, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.areas, Color(0.07, 0.27, 0.37, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.farmland, Color(0.07, 0.27, 0.37, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.1, 0.2, 0.4, 1.0), 0.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.082, 0.173, 0.267, 1.0), 0.0);
 
-            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(1.0, 1.0, 1.0, 1.0), 4.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.0, 1.0, 0.93, 1.0), 5.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.0, 1.0, 0.93, 1.0), 6.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.0, 1.0, 0.93, 1.0), 8.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.0, 1.0, 0.93, 1.0), 14.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.0, 0.7, 0.65, 1.0), 10.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(0.75, 0.196, 0.263, 1.0), 4.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.075, 0.196, 0.263, 1.0), 6.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.075, 0.196, 0.263, 1.0), 7.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.075, 0.196, 0.263, 1.0), 9.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), 14.0);
+            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.075, 0.196, 0.263, 1.0), 10.0);
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
