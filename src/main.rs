@@ -326,7 +326,6 @@ fn main() {
         layout(location = 0) in vec2 position;
         layout(location = 1) in vec2 normal;
         layout(location = 2) in float sign;
-        // layout(location = 1) in vec2 a_bary;
         out vec3 v_bary;
         out float v_dist;
 
@@ -384,9 +383,7 @@ fn main() {
             color = vec4(1.0);
             float dist = abs(v_dist);
 
-
             color = fill_color;
-
 
             { // Border
                 // float border = 2/tesselation_width;
@@ -636,18 +633,28 @@ fn main() {
                 }
             }
 
+            fn render_outlined_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, mut width: f32, scale_factor: f32, scale: f32) {
+                // Render the poly twice, one scaled up. The outline thickness is scaled according
+                // to the zoom to appear in screenspace. The poly itself is in world space
+                width *= scale_factor; // Transform the width to worldspace
+                // Transform to worldspace, then screenpace
+                let outline_width = (7000.0*scale_factor)/scale;
+                render_poly(&shader_program, &tile_transform32, &layer, fgcolor, width + outline_width);
+                render_poly(&shader_program, &tile_transform32, &layer, bgcolor, width);
+            }
+
             render_poly(&shader_program, &tile_transform32, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.areas, Color(0.07, 0.27, 0.37, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.farmland, Color(0.07, 0.27, 0.37, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
             render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.082, 0.173, 0.267, 1.0), 0.0);
 
-            render_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(0.75, 0.196, 0.263, 1.0), 4.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.075, 0.196, 0.263, 1.0), 6.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.075, 0.196, 0.263, 1.0), 7.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.075, 0.196, 0.263, 1.0), 9.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), 14.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.075, 0.196, 0.263, 1.0), 10.0);
+            let scale_factor = 1.0/grid_step as f32;
+            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.3, scale_factor, scale as f32);
+            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.4, scale_factor, scale as f32);
+            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.7, scale_factor, scale as f32);
+            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.9, scale_factor, scale as f32);
+            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 1.0, scale_factor, scale as f32);
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
@@ -675,7 +682,7 @@ fn main() {
 
         // draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
         // draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
-        // draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
 
         window.swap_buffers();
     }

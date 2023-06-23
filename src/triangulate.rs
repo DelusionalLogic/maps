@@ -127,6 +127,8 @@ where P: Iterator<Item=(f64, f64)> + Clone,
     inverted_vid.push(None);
     inverted_vid.push(None);
 
+    // @SPEED: According to the paper you should add the edges as early as possible. We are doing
+    // the opposite by adding all the points first and then the edges.
     fn flush_tri(tris: &mut ActiveTriangulation, vid: &mut Vec<usize>) -> Result<(), Error> {
         if vid.len() < 3 { return Err(Error::InvalidPoly); }
         // Add all the edges
@@ -182,10 +184,16 @@ where P: Iterator<Item=(f64, f64)> + Clone,
 
 impl ActiveTriangulation {
     pub fn super_tri_of_bbox(bbox: &BBox, num_verts: u64) -> Self {
+        // We need 3 more verts to store the supertri
         let mut verts = Vec::with_capacity(num_verts as usize + 3);
+        // We start with 1 supertri, and every vert added rips 1(2) and adds 3(4)
         let mut tris = Vec::with_capacity((num_verts as usize * 2) + 1);
+        // Since we have a single poly, every vert also has and edge, but for implementation
+        // reasons we store that as 2 edges, one in either direction.
         let edges = HashSet::with_capacity(num_verts as usize * 2);
+        // Every tri has an adjecency
         let mut adj = Vec::with_capacity(tris.capacity());
+        // Every vert has some tri
         let mut inverse_tri = Vec::with_capacity(verts.capacity());
 
         let center_x = (bbox.min.x + bbox.max.x) / 2.0;
@@ -261,7 +269,7 @@ impl ActiveTriangulation {
         // Trim away the unused triangles left from the triangulation phase. The idea is to walk
         // the triangle mesh and save if it's inside or outside, flipping the state whenever we hit
         // a fixed edge. Every triangle is given it's state on the first visit, and future visit
-        // just check if the state is consistent.
+        // just check if the state is consistent (omitted in release).
         let mut outside = vec![None; self.tris.len()];
 
         // All the triangles that touch point 0 (one of the start points) are guaranteed to be
@@ -281,19 +289,25 @@ impl ActiveTriangulation {
                     continue;
                 }
 
-                // If the joining edge is fixed we flip the state bit
-                let fixed = self.is_fixed(self.tris[x][corner1 as usize], self.tris[x][corner2 as usize]);
-                let their_state = outside[x].unwrap() ^ fixed;
-
                 if let Some(my_state) = outside[t_opt.unwrap().tri] {
                     // The triangle was already visited, just check for consistency
-                    if my_state != their_state {
-                        // Inconsistency, there was a hole in the polygon
-                        return Err(Error::InternalAlgo);
+                    if cfg!(debug_assertions) {
+                        let fixed = self.is_fixed(self.tris[x][corner1 as usize], self.tris[x][corner2 as usize]);
+                        let their_state = outside[x].unwrap() ^ fixed;
+
+                        if my_state != their_state {
+                            // Inconsistency, there was a hole in the polygon
+                            return Err(Error::InternalAlgo);
+                        }
                     }
                 } else {
                     // Assign the current state to the triangle and schedule a visit to its
                     // neighbours
+
+                    // If the joining edge is fixed we flip the state bit
+                    let fixed = self.is_fixed(self.tris[x][corner1 as usize], self.tris[x][corner2 as usize]);
+                    let their_state = outside[x].unwrap() ^ fixed;
+
                     outside[t_opt.unwrap().tri] = Some(their_state);
                     stack.push(t_opt.unwrap().tri);
                 }
@@ -415,15 +429,91 @@ impl ActiveTriangulation {
         return (v3, tri2, tri1);
     }
 
+    fn split_tri_edge(&mut self, tri: usize, side: u8, p: &Vector) -> (usize, usize, u8, usize, usize) {
+        // Split the 2 bordering tris into 4
+
+        let original_tri1 = tri;
+        let original_tri2 = self.opposing_tri(&TriSide{tri, side}).unwrap();
+
+        // Fetch the outside neighbours
+        // o1 and o3 aren't fetched as they are left untouched
+        let o0 = self.opposing_tri(&TriSide{tri, side: anticlockwise(side)});
+        let o2 = self.opposing_tri(&TriSide{tri: original_tri2.tri, side: anticlockwise(original_tri2.side)});
+
+        let v0 = self.tris[original_tri1][side as usize];
+        let v1 = self.tris[original_tri1][anticlockwise(side) as usize];
+        let v2 = self.tris[original_tri2.tri][original_tri2.side as usize];
+        let v3 = self.tris[original_tri1][clockwise(side) as usize];
+
+        let new_v = self.verts.len();
+        self.verts.push(*p);
+
+        self.tris[original_tri1][clockwise(side) as usize] = new_v;
+        self.tris[original_tri2.tri][clockwise(original_tri2.side) as usize] = new_v;
+
+        let new_tri1o = [v3, v0, new_v];
+        let new_tri1 = self.tris.len();
+        self.tris.push(new_tri1o);
+        let new_tri2o = [v1, v2, new_v];
+        let new_tri2 = self.tris.len();
+        self.tris.push(new_tri2o);
+
+        self.adj[original_tri1][side as usize] = Some(TriSide{tri: new_tri2, side: 1});
+        self.adj[original_tri1][anticlockwise(side) as usize] = Some(TriSide{tri: new_tri1, side: 0});
+        self.adj[original_tri2.tri][original_tri2.side as usize] = Some(TriSide{tri: new_tri1, side: 1});
+        self.adj[original_tri2.tri][anticlockwise(original_tri2.side) as usize] = Some(TriSide{tri: new_tri2, side: 0});
+
+        if let Some(o0) = o0 {
+            self.adj[o0.tri][o0.side as usize] = Some(TriSide{tri: new_tri1, side: 2});
+        }
+        if let Some(o2) = o2 {
+            self.adj[o2.tri][o2.side as usize] = Some(TriSide{tri: new_tri2, side: 2});
+        }
+
+        // We have to push these in the same order as the triangles
+        // new_tri1
+        self.adj.push([
+            Some(TriSide { tri: original_tri1, side: anticlockwise(side)}),
+            Some(TriSide { tri: original_tri2.tri, side: original_tri2.side}),
+            o0,
+        ]);
+        // new_tri2
+        self.adj.push([
+            Some(TriSide { tri: original_tri2.tri, side: anticlockwise(original_tri2.side)}),
+            Some(TriSide { tri: original_tri1, side}),
+            o2,
+        ]);
+
+        self.inverse_tri[v0] = TriSide{tri: new_tri1, side: 1};
+        self.inverse_tri[v1] = TriSide{tri: new_tri2, side: 0};
+        self.inverse_tri[v2] = TriSide{tri: new_tri2, side: 1};
+        self.inverse_tri[v3] = TriSide{tri: new_tri1, side: 0};
+        self.inverse_tri.push(TriSide{tri: new_tri1, side: 2});
+
+        if self.edges.remove(&[v1, v3]) || self.edges.remove(&[v3, v1]) {
+            self.fix_edge(v1, new_v);
+            self.fix_edge(new_v, v3);
+        }
+
+        return (new_v, original_tri2.tri, original_tri2.side, new_tri1, new_tri2)
+    }
+
     pub fn is_fixed(&self, v1i: usize, v2i: usize) -> bool {
-        return self.edges.contains(&[v1i, v2i]) || self.edges.contains(&[v2i, v1i]);
+        return self.edges.contains(&[v1i, v2i]);
+    }
+
+    pub fn fix_edge(&mut self, v1i: usize, v2i: usize) {
+        self.edges.insert([v1i, v2i]);
+        self.edges.insert([v2i, v1i]);
     }
 
     fn resolve_with_swaps(&mut self, v: usize, mut stack: Vec<TriSide>) {
         let mut iter = 0;
         while let Some(curs) = stack.pop() {
             iter += 1;
-            assert!(iter < 100);
+            if iter > self.tris.len() {
+                panic!("Too many swaps");
+            }
 
             let t_opt = self.opposing_tri(&curs);
             if t_opt.is_none() {
@@ -455,7 +545,6 @@ impl ActiveTriangulation {
                     self.adj[t3.tri][t3.side as usize] = Some(t_opt);
                 }
 
-
                 self.adj[curs.tri][me_clock as usize] = Some(TriSide{tri: t_opt.tri, side:oppo_clock});
                 self.adj[t_opt.tri][oppo_clock as usize] = Some(TriSide{tri: curs.tri, side:me_clock});
 
@@ -472,102 +561,40 @@ impl ActiveTriangulation {
     }
 
     pub fn add_point(&mut self, p: &Vector) -> Result<usize, Error> {
-        // @SPEED: We should save some start_tri that's likely to be close to the point
-        let (tri, loc) = self.find_containg_tri(p, None)?;
+        // @SPEED: Is the last tri always a good starting point?
+        let (tri, loc) = self.find_containg_tri(p, Some(self.tris.len()-1))?;
 
         assert!(loc.is_inside());
 
-        if let TriangleLocation::IsCorner(x) = loc {
-            return Ok(self.tris[tri][x as usize]);
+        let new_vert;
+        let mut stack = Vec::with_capacity(16); // Just some random size
+        match loc {
+            TriangleLocation::IsCorner(x) => {
+                // Point already part of the mesh
+                return Ok(self.tris[tri][x as usize]);
+            }
+            TriangleLocation::OnEdge(side) => {
+                let (vert, tri2, tri2_side, tri3, tri4) = self.split_tri_edge(tri, side, p);
+                new_vert = vert;
+
+                stack.push(TriSide{tri, side: clockwise(side)});
+                stack.push(TriSide{tri: tri2, side: clockwise(tri2_side)});
+                stack.push(TriSide{tri: tri3, side: 2});
+                stack.push(TriSide{tri: tri4, side: 2});
+            }
+            TriangleLocation::Inside => {
+                let (vert, tri2, tri3) = self.split_tri(tri, p);
+                new_vert = vert;
+
+                stack.push(TriSide{tri, side: 2});
+                stack.push(TriSide{tri: tri2, side: 2});
+                stack.push(TriSide{tri: tri3, side: 2});
+            }
+            TriangleLocation::Outside(_) => panic!("Point is located outside the mesh"),
         }
 
-        if let TriangleLocation::OnEdge(side) = loc {
-            // Split the 2 bordering tris into 4
-
-            let original_tri1 = tri;
-            let original_tri2 = self.opposing_tri(&TriSide{tri, side}).unwrap();
-
-            // Fetch the outside neighbours
-            // o1 and o3 aren't fetched as they are left untouched
-            let o0 = self.opposing_tri(&TriSide{tri, side: anticlockwise(side)});
-            let o2 = self.opposing_tri(&TriSide{tri: original_tri2.tri, side: anticlockwise(original_tri2.side)});
-
-            let v0 = self.tris[original_tri1][side as usize];
-            let v1 = self.tris[original_tri1][anticlockwise(side) as usize];
-            let v2 = self.tris[original_tri2.tri][original_tri2.side as usize];
-            let v3 = self.tris[original_tri1][clockwise(side) as usize];
-
-            let new_v = self.verts.len();
-            self.verts.push(*p);
-
-            self.tris[original_tri1][clockwise(side) as usize] = new_v;
-            self.tris[original_tri2.tri][clockwise(original_tri2.side) as usize] = new_v;
-
-            let new_tri1o = [v3, v0, new_v];
-            let new_tri1 = self.tris.len();
-            self.tris.push(new_tri1o);
-            let new_tri2o = [v1, v2, new_v];
-            let new_tri2 = self.tris.len();
-            self.tris.push(new_tri2o);
-
-            self.adj[original_tri1][side as usize] = Some(TriSide{tri: new_tri2, side: 1});
-            self.adj[original_tri1][anticlockwise(side) as usize] = Some(TriSide{tri: new_tri1, side: 0});
-            self.adj[original_tri2.tri][original_tri2.side as usize] = Some(TriSide{tri: new_tri1, side: 1});
-            self.adj[original_tri2.tri][anticlockwise(original_tri2.side) as usize] = Some(TriSide{tri: new_tri2, side: 0});
-
-            if let Some(o0) = o0 {
-                self.adj[o0.tri][o0.side as usize] = Some(TriSide{tri: new_tri1, side: 2});
-            }
-            if let Some(o2) = o2 {
-                self.adj[o2.tri][o2.side as usize] = Some(TriSide{tri: new_tri2, side: 2});
-            }
-
-            // We have to push these in the same order as the triangles
-            // new_tri1
-            self.adj.push([
-                Some(TriSide { tri: original_tri1, side: anticlockwise(side)}),
-                Some(TriSide { tri: original_tri2.tri, side: original_tri2.side}),
-                o0,
-            ]);
-            // new_tri2
-            self.adj.push([
-                Some(TriSide { tri: original_tri2.tri, side: anticlockwise(original_tri2.side)}),
-                Some(TriSide { tri: original_tri1, side}),
-                o2,
-            ]);
-
-            self.inverse_tri[v0] = TriSide{tri: new_tri1, side: 1};
-            self.inverse_tri[v1] = TriSide{tri: new_tri2, side: 0};
-            self.inverse_tri[v2] = TriSide{tri: new_tri2, side: 1};
-            self.inverse_tri[v3] = TriSide{tri: new_tri1, side: 0};
-            self.inverse_tri.push(TriSide{tri: new_tri1, side: 2});
-
-            if self.edges.remove(&[v1, v3]) || self.edges.remove(&[v3, v1]) {
-                self.edges.insert([v1, new_v]);
-                self.edges.insert([new_v, v3]);
-            }
-
-            let stack = vec![
-                TriSide{tri: original_tri1, side: clockwise(side)},
-                TriSide{tri: original_tri2.tri, side: clockwise(original_tri2.side)},
-                TriSide{tri: new_tri1, side: 2},
-                TriSide{tri: new_tri2, side: 2},
-            ];
-            self.resolve_with_swaps(new_v, stack);
-
-            return Ok(new_v);
-        } else {
-            let (new_vert, tri2, tri3) = self.split_tri(tri, p);
-
-            let stack = vec![
-                TriSide{tri, side: 2},
-                TriSide{tri: tri2, side: 2},
-                TriSide{tri: tri3, side: 2},
-            ];
-            self.resolve_with_swaps(new_vert, stack);
-
-            return Ok(new_vert);
-        }
+        self.resolve_with_swaps(new_vert, stack);
+        return Ok(new_vert);
     }
 
     fn find_tri_with_vert(&self, needle: usize) -> &TriSide {
@@ -641,7 +668,7 @@ impl ActiveTriangulation {
         } else {
             // If a single tri contains both v1 and v2 we aren't cutting any edge and trivially return.
             // The edge is already part of the mesh
-            self.edges.insert([v1i, v2i]);
+            self.fix_edge(v1i, v2i);
             return Ok(());
         }
 
@@ -653,7 +680,7 @@ impl ActiveTriangulation {
         } else {
             // If a single tri contains both v1 and v2 we aren't cutting any edge and trivially return.
             // The edge is already part of the mesh
-            self.edges.insert([v1i, v2i]);
+            self.fix_edge(v1i, v2i);
             return Ok(());
         }
 
@@ -665,7 +692,7 @@ impl ActiveTriangulation {
             return Err(Error::InvalidPoly);
         }
 
-        // We'll tear our exactly as many triangles as we'll put back afterwards so we need to save
+        // We'll tear out exactly as many triangles as we'll put back afterwards so we need to save
         // the triangle ids we tear out to reuse them when rebuilding
         // Kill the inital tri
         let mut dead_tris: Vec<usize> = vec![tri_cursor.tri];
@@ -783,7 +810,7 @@ impl ActiveTriangulation {
         }
 
         // Fix the edge
-        self.edges.insert([v1i, v2i]);
+        self.fix_edge(v1i, v2i);
 
         return Ok(());
     }

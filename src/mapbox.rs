@@ -206,14 +206,8 @@ pub mod pbuf {
         }
 
         fn fastforward(&mut self, bytes: usize) -> Result<()> {
-            let mut buf = vec![0; bytes];
-            match self.reader.read_exact(&mut buf) {
-                Ok(_) => return Ok(()),
-                Err(x) if x.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(Error::EOF());
-                },
-                Err(x) => return Err(x.into()),
-            };
+            self.reader.cursor += bytes;
+            return Ok(());
         }
 
         pub fn skip(&mut self, wtype: WireType) -> Result<()> {
@@ -591,6 +585,75 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         return Ok(layer_messages.try_into().unwrap());
     }
 
+    struct Filter<const N: usize> {
+        keys: [Option<u64>; N],
+        values: [Option<u64>; N],
+        groups: [u64; N],
+    }
+
+    impl<const N: usize> Filter<N> {
+        pub fn scan(reader: &mut pbuf::Message, keys: [&str; N], values: [&str; N], groups: [u64; N]) ->pbuf::Result<Self> {
+            assert!(keys.len() == values.len());
+            assert!(keys.len() == groups.len());
+
+            let (keys, values) = scan_for_keys_and_values(reader, &keys.to_vec(), &values.to_vec())?;
+
+            return Ok(Filter{
+                keys: keys.try_into().expect("Array of scanned keys did not match input"),
+                values: values.try_into().expect("Array of scanned values did not match input"),
+                groups,
+            });
+        }
+
+        pub fn sieve_features(&self, reader: &mut pbuf::Message) -> pbuf::Result<(Vec<pbuf::Message>, [Vec<pbuf::Message>; N])> {
+            // @SPEED: There may be some way to read the buffer linearly here instead of fucking up the
+            // ordering. This is fine for now.
+            let mut other = vec![];
+            let mut features = std::array::from_fn(|_| vec![]);
+
+            {
+                while let Ok(field) = reader.next() {
+                    match field {
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                        pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                            reader.enter_message()?;
+                            let feature_ptr = reader.clone();
+                            let mut bucket = &mut other;
+                            while let Ok(field) = reader.next() {
+                                match field {
+                                    pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
+                                        let geo_type = reader.read_var_int()?;
+                                        assert!(geo_type == 3);
+                                    },
+                                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                                        let mut it = reader.read_packed_var_int()?;
+                                        while let Some(tag) = it.next() {
+                                            let key = tag?;
+                                            let value = it.next().unwrap()?;
+
+                                            for i in 0..self.keys.len() {
+                                                if self.keys[i] == Some(key) && self.values[i] == Some(value) {
+                                                    let group = self.groups[i];
+                                                    bucket = &mut features[group as usize];
+                                                }
+                                            }
+                                        }
+                                    },
+                                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                                    x => { reader.skip(x.wtype)?; },
+                                }
+                            }
+                            bucket.push(feature_ptr);
+                        }
+                        x => { reader.skip(x.wtype)?; },
+                    }
+                }
+
+                return Ok((other, features));
+            }
+        }
+    }
+
     fn scan_for_keys_and_values(reader: &mut pbuf::Message, keys: &Vec<&str>, values: &Vec<&str>) -> pbuf::Result<(Vec<Option<u64>>, Vec<Option<u64>>)> {
         let mut key_count = 0;
         let mut value_count = 0;
@@ -838,76 +901,15 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
     }
 
     fn read_landuse_layer(reader: &mut pbuf::Message) -> pbuf::Result<(PolyGeom, PolyGeom, PolyGeom)> {
-        let key_ids;
-        let value_ids;
+        let filter = Filter::scan(
+            &mut reader.clone(),
+            ["landuse", "amenity", "place", "landuse"],
+            ["farmland", "university", "neighbourhood", "residential"],
+            [ 0, 1, 1, 1, ],
+        )?;
 
-        {
-            let (key_idsx, value_idsx) = scan_for_keys_and_values(
-                &mut reader.clone(),
-                &vec!["landuse", "amenity", "place", "landuse"],
-                &vec!["farmland", "university", "neighbourhood", "residential"],
-            )?;
+        let (mut other_features, mut features) = filter.sieve_features(reader)?;
 
-            key_ids = key_idsx;
-            value_ids = value_idsx;
-        }
-
-        // @SPEED: There may be some way to read the buffer linearly here instead of fucking up the
-        // ordering. This is fine for now.
-        let groups = [
-            0,
-            1,
-            1,
-            1,
-        ];
-        let mut other_features = vec![];
-        let mut features = vec![];
-        for _ in 0..2 {
-            features.push(vec![]);
-        }
-
-        assert!(key_ids.len() == value_ids.len());
-        assert!(key_ids.len() == groups.len());
-        {
-            while let Ok(field) = reader.next() {
-                match field {
-                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
-                        reader.enter_message()?;
-                        let feature_ptr = reader.clone();
-                        let mut bucket = &mut other_features;
-                        while let Ok(field) = reader.next() {
-                            match field {
-                                pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
-                                    let geo_type = reader.read_var_int()?;
-                                    assert!(geo_type == 3);
-                                },
-                                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
-                                    let mut it = reader.read_packed_var_int()?;
-                                    while let Some(tag) = it.next() {
-                                        let key = tag?;
-                                        let value = it.next().unwrap()?;
-
-                                        for i in 0..key_ids.len() {
-                                            if key_ids[i] == Some(key) && value_ids[i] == Some(value) {
-                                                let group = groups[i];
-                                                bucket = &mut features[group];
-                                            }
-                                        }
-                                    }
-                                },
-                                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                                x => { reader.skip(x.wtype)?; },
-                            }
-                        }
-                        bucket.push(feature_ptr);
-                    }
-                    x => { reader.skip(x.wtype)?; },
-                }
-            }
-        }
-
-        dbg!(&features);
         fn read_geometry(features: &mut Vec<pbuf::Message>) -> pbuf::Result<PolyGeom> {
             let mut poly_start : Vec<LineStart> = vec![];
             let mut polys : Vec<LineVert> = vec![];
@@ -1254,26 +1256,77 @@ pub mod pmtile {
         return (acc + d) as u64;
     }
 
+    pub trait Renderer {
+        type Layer;
+
+        fn upload_layer(data: &Vec<crate::mapbox::LineVert>) -> Self::Layer;
+    }
+
+    pub struct GL { }
+
+    fn polygon_area_two(polys: &[crate::mapbox::LineVert]) -> f32 {
+        let start = 0;
+        let end = polys.len();
+
+        let mut area = 0.0;
+        for i in start..end-1 {
+            area += polys[i].x*polys[i+1].y - polys[i].y*polys[i+1].x;
+        }
+        area += polys[end-1].x*polys[start].y - polys[end-1].y*polys[start].x;
+
+        return area;
+    }
+
+    impl Renderer for GL {
+        type Layer = Layer;
+
+        fn upload_layer(data: &Vec<crate::mapbox::LineVert>) -> Layer {
+            let mut vao = 0;
+            unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+            let mut vbo = 0;
+            unsafe { gl::GenBuffers(1, &mut vbo) };
+
+            unsafe {
+                gl::BindVertexArray(vao);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::LineVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
+
+                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+                gl::EnableVertexAttribArray(0);
+                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(1);
+                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(2);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+                gl::BindVertexArray(0);
+            }
+            return Layer{ vao, vbo, size: data.len() };
+        }
+    }
+
     pub struct Layer {
         pub vao: u32,
         pub vbo: u32,
         pub size: usize,
     }
 
-    pub struct Layers {
-        pub earth: Option<Layer>,
-        pub roads: Option<Layer>,
-        pub highways: Option<Layer>,
-        pub major: Option<Layer>,
-        pub medium: Option<Layer>,
-        pub minor: Option<Layer>,
-        pub buildings: Option<Layer>,
-        pub water: Option<Layer>,
-        pub farmland: Option<Layer>,
-        pub areas: Option<Layer>,
+    pub struct Layers<R: Renderer> {
+        pub earth: Option<R::Layer>,
+        pub roads: Option<R::Layer>,
+        pub highways: Option<R::Layer>,
+        pub major: Option<R::Layer>,
+        pub medium: Option<R::Layer>,
+        pub minor: Option<R::Layer>,
+        pub buildings: Option<R::Layer>,
+        pub water: Option<R::Layer>,
+        pub farmland: Option<R::Layer>,
+        pub areas: Option<R::Layer>,
     }
 
-    impl Default for Layers {
+    impl<R:Renderer> Default for Layers<R> {
         fn default() -> Self {
             return Layers {
                 earth: None,
@@ -1290,14 +1343,14 @@ pub mod pmtile {
         }
     }
 
-    pub struct Tile {
+    pub struct Tile<R: Renderer> {
         pub tid: u64,
         pub x: u64,
         pub y: u64,
         pub z: u8,
         pub extent: u16,
 
-        pub layers: Layers,
+        pub layers: Layers<R>,
     }
 
     impl Drop for Layer {
@@ -1364,49 +1417,10 @@ pub mod pmtile {
         }
     }
 
-    fn compile_tile(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile, String> {
+    fn compile_tile<R: Renderer>(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
         let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
-        fn compile_line_layer(raw_tile: &crate::mapbox::LineGeom) -> Layer {
-            let mut vao = 0;
-            unsafe { gl::GenVertexArrays(1, &mut vao) };
-
-            let mut vbo = 0;
-            unsafe { gl::GenBuffers(1, &mut vbo) };
-
-            unsafe {
-                gl::BindVertexArray(vao);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (raw_tile.data.len() * std::mem::size_of::<super::LineVert>()) as _, raw_tile.data.as_ptr().cast(), gl::STATIC_DRAW);
-
-                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
-                gl::EnableVertexAttribArray(0);
-                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(1);
-                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(2);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-                gl::BindVertexArray(0);
-            }
-            return Layer{ vao, vbo, size: raw_tile.data.len() };
-        }
-
-        fn polygon_area_two(polys: &[crate::mapbox::LineVert]) -> f32 {
-            let start = 0;
-            let end = polys.len();
-
-            let mut area = 0.0;
-            for i in start..end-1 {
-                area += polys[i].x*polys[i+1].y - polys[i].y*polys[i+1].x;
-            }
-            area += polys[end-1].x*polys[start].y - polys[end-1].y*polys[start].x;
-
-            return area;
-        }
-
-        fn compile_polygon_layer(raw_tile: &mut crate::mapbox::PolyGeom) -> Layer {
+        fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom) -> R::Layer {
             let poly_start = &raw_tile.start;
             let polys = &mut raw_tile.data;
             let mut tri_polys : Vec<super::LineVert> = vec![];
@@ -1503,7 +1517,7 @@ pub mod pmtile {
                     .map(|i| (i.x as f64, i.y as f64));
                 let normals = &normals[polys_start..polys_end];
 
-                let (tris, vid) = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys.len()).unwrap();
+                let (tris, vid) = triangulate::triangulate(poly_start.iter().filter(|x| x.pos >= offset).map(|x| x.pos-offset), point_it, polys_end-polys_start).unwrap();
                 let triangulation = tris
                     .trim().unwrap();
 
@@ -1525,42 +1539,24 @@ pub mod pmtile {
                 offset += polys_end - polys_start;
             }
 
-            let mut vao = 0;
-            unsafe { gl::GenVertexArrays(1, &mut vao) };
+            return R::upload_layer(&tri_polys);
+        }
 
-            let mut vbo = 0;
-            unsafe { gl::GenBuffers(1, &mut vbo) };
-
-            unsafe {
-                gl::BindVertexArray(vao);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (tri_polys.len() * std::mem::size_of::<super::LineVert>()) as _, tri_polys.as_ptr().cast(), gl::STATIC_DRAW);
-
-                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
-                gl::EnableVertexAttribArray(0);
-                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(1);
-                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(2);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-                gl::BindVertexArray(0);
-            }
-            return Layer{ vao, vbo, size: tri_polys.len() };
+        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom) -> R::Layer {
+            return R::upload_layer(&raw_tile.data);
         }
 
         let layers = Layers{
-            earth: Some(compile_polygon_layer(&mut raw_tile.earth)),
-            roads: Some(compile_line_layer(&raw_tile.roads)),
-            highways: Some(compile_line_layer(&raw_tile.highways)),
-            major: Some(compile_line_layer(&raw_tile.major)),
-            medium: Some(compile_line_layer(&raw_tile.medium)),
-            minor: Some(compile_line_layer(&raw_tile.minor)),
-            buildings: Some(compile_polygon_layer(&mut raw_tile.buildings)),
-            water: Some(compile_polygon_layer(&mut raw_tile.water)),
-            farmland: Some(compile_polygon_layer(&mut raw_tile.farmland)),
-            areas: Some(compile_polygon_layer(&mut raw_tile.areas)),
+            earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads)),
+            highways: Some(compile_line_layer::<R>(&raw_tile.highways)),
+            major: Some(compile_line_layer::<R>(&raw_tile.major)),
+            medium: Some(compile_line_layer::<R>(&raw_tile.medium)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor)),
+            buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings)),
+            water: Some(compile_polygon_layer::<R>(&mut raw_tile.water)),
+            farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland)),
+            areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -1576,7 +1572,7 @@ pub mod pmtile {
     }
 
     static mut TILE_NUM  : u64 = 0;
-    pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile {
+    pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile<GL> {
         let mut verts: Vec<super::LineVert> = vec![];
 
         let mut lv = Vector2::new(0.0, 0.0);
@@ -1761,7 +1757,7 @@ pub mod pmtile {
 
     }
 
-    pub struct File {
+    pub struct File<R: Renderer> {
         file: std::fs::File,
         root_offset: u64,
         root_len: usize,
@@ -1780,9 +1776,11 @@ pub mod pmtile {
         fdir: Option<NonNull<Directory>>,
         ldir: Option<NonNull<Directory>>,
         dcache: HashMap<u64, Directory>,
+
+        r: std::marker::PhantomData<R>,
     }
 
-    impl File {
+    impl<R: Renderer> File<R> {
         pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
             let mut file = std::fs::File::open(path).unwrap();
 
@@ -1827,6 +1825,8 @@ pub mod pmtile {
                 fdir: None,
                 ldir: None,
                 dcache: HashMap::new(),
+
+                r: std::marker::PhantomData,
             };
         }
 
@@ -1879,7 +1879,7 @@ pub mod pmtile {
             };
         }
 
-        fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Option<Tile> {
+        pub fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Option<Tile<R>> {
             if level > self.max_zoom || level < self.min_zoom {
                 return None;
             }
@@ -1912,14 +1912,14 @@ pub mod pmtile {
     }
 
     pub struct LiveTiles {
-        pub source: File,
+        pub source: File<GL>,
 
-        pub active: HashMap<u64, Tile>,
+        pub active: HashMap<u64, Tile<GL>>,
         pub visible: Vec<u64>,
     }
 
     impl LiveTiles {
-        pub fn new(source: File) -> Self {
+        pub fn new(source: File<GL>) -> Self {
             return LiveTiles {
                 source,
                 active: HashMap::new(),
