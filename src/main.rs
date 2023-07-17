@@ -18,6 +18,72 @@ const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
 
+type GLTransform = [f32; 16];
+
+struct Transform {
+    mats : [Mat4; 2],
+    primary: bool,
+}
+
+impl Transform {
+    pub fn from_mat(source: Mat4) -> Self {
+        return Transform{
+            mats: [source, math::MAT4_IDENTITY],
+            primary: false,
+        };
+    }
+
+    pub fn identity() -> Self {
+        return Self::from_mat(math::MAT4_IDENTITY);
+    }
+
+    fn split(&self) -> (usize, usize) {
+        let primary = if self.primary { 1 } else { 0 };
+        let secondary = if self.primary { 0 } else { 1 };
+
+        return (primary, secondary);
+    }
+
+    fn apply(&mut self, op: &Mat4) {
+        let (primary, secondary) = self.split();
+
+        // self.mats[secondary] = op.mul(&self.mats[primary]);
+        self.mats[secondary] = self.mats[primary].mul(op);
+        self.primary = !self.primary;
+    }
+
+    pub fn translate<T: Into<f64> + Copy>(&mut self, offset: &Vector2<T>) {
+        self.apply(&Mat4::translate(offset.x.into(), offset.y.into()));
+    }
+
+    pub fn rotate<T: Into<f64>>(&mut self, theta: T) {
+        self.apply(&Mat4::rotate_2d(theta.into()));
+    }
+
+    pub fn scale<T: Into<f64> + Copy>(&mut self, scale: &Vector2<T>) {
+        self.apply(&Mat4::scale_2d(scale.x.into(), scale.y.into()));
+    }
+
+    pub fn to_gl(&self) -> GLTransform {
+        let (primary, _) = self.split();
+        return (&self.mats[primary]).into();
+    }
+}
+
+impl<'a> Into<&'a Mat4> for &'a Transform {
+    fn into(self) -> &'a Mat4 {
+        let (primary, _) = self.split();
+        return &self.mats[primary];
+    }
+}
+
+impl Clone for Transform {
+    fn clone(&self) -> Self {
+        let (primary, _) = self.split();
+        return Transform::from_mat(self.mats[primary].clone());
+    }
+}
+
 fn compile_shader(vert: &str, frag: &str) -> u32 {
     let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
     unsafe {
@@ -82,6 +148,7 @@ fn compile_shader(vert: &str, frag: &str) -> u32 {
 
 pub struct LineProg {
     program: u32,
+    pre_transform: i32,
     transform: i32,
     width: i32,
     fill_color: i32,
@@ -92,6 +159,9 @@ struct Character {
     bearing: Vector2<f32>,
     advance: f32,
     texture: u32,
+
+    min: Vector2<f32>,
+    max: Vector2<f32>,
 }
 
 struct FontMap {
@@ -142,13 +212,14 @@ fn load_font() -> FontMap {
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
     for i in 0..128 {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
-        let bitmap = face.glyph().bitmap();
+        let glyph = face.glyph();
+        let bitmap = glyph.bitmap();
         let size = Vector2::new(bitmap.width() as f32, bitmap.rows() as f32);
         let bearing = Vector2::new(
-            face.glyph().bitmap_left() as f32,
-            -face.glyph().bitmap_top() as f32,
+            glyph.bitmap_left() as f32,
+            -glyph.bitmap_top() as f32,
         );
-        let advance = (face.glyph().advance().x >> 6) as f32;
+        let advance = (glyph.advance().x >> 6) as f32;
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, textures[i]);
@@ -166,11 +237,19 @@ fn load_font() -> FontMap {
             );
         };
 
+        let metrics = glyph.metrics();
+
+        let min = Vector2::new(metrics.horiBearingX as f32/64.0, -metrics.horiBearingY as f32/64.0);
+        let mut max = Vector2::new(metrics.width as f32/64.0, metrics.height as f32/64.0);
+        max.addv2(&min);
+
         chars.push(Character {
             size,
             bearing,
             advance,
             texture: textures[i],
+            min,
+            max,
         });
     }
 
@@ -249,7 +328,29 @@ fn load_font() -> FontMap {
     };
 }
 
-fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8], pos: &Vector2<f32>) {
+fn size_ascii(font: &FontMap, text: &[u8]) -> (Vector2<f32>, Vector2<f32>) {
+    let mut advance = 0.0;
+    let mut max = Vector2::new(0.0, 0.0);
+    let mut min = Vector2::new(0.0, 0.0);
+
+    for c in text {
+        let char = &font.chars[*c as usize];
+        advance += char.advance;
+
+        let mut char_min = Vector2::new(advance as f32, 0.0);
+        char_min.addv2(&char.min);
+
+        let mut char_max = Vector2::new(advance as f32, 0.0);
+        char_max.addv2(&char.max);
+
+        min.min(&char_min);
+        max.max(&char_max);
+    }
+
+    return (min, max);
+}
+
+fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8]) {
     unsafe {
         gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
         gl::Enable(gl::BLEND);
@@ -260,14 +361,14 @@ fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8], pos: &Vector2<f32>
         gl::Uniform1i(font.uni_texture, 0);
     }
 
-    let mut pen = *pos;
+    let mut pen = Vector2::new(0.0, 0.0);
     for c in text {
         let char = &font.chars[*c as usize];
 
         let mut pos = pen;
         pos.addv2(&char.bearing);
 
-        let mvp = Mat4::scale_2d(char.size.x as f64, char.size.y as f64).mul(&Mat4::translate(pos.x as f64, pos.y as f64).mul(projection));
+        let mvp = projection.mul(&Mat4::translate(pos.x as f64, pos.y as f64)).mul(&Mat4::scale_2d(char.size.x as f64, char.size.y as f64));
         let mvp32: [f32; 16] = mvp.into();
 
         unsafe {
@@ -328,8 +429,9 @@ fn main() {
         layout(location = 2) in float sign;
         out vec3 v_bary;
         out float v_dist;
+        out vec2 norm;
 
-
+        uniform mat4 pre_transform;
         uniform mat4 transform;
         uniform float tesselation_width;
 
@@ -343,9 +445,11 @@ fn main() {
             v_bary = barys[gl_VertexID % 3];
             v_dist = sign;
 
-            vec2 dnormal = clamp(normal, vec2(-1,-1), vec2(1, 1));
-            vec2 gp = position + dnormal*tesselation_width;
-            gl_Position = transform * vec4(gp, 0.0, 1.0);
+            vec2 dnormal = normal; // * vec2(1.0, -1.0);
+            // dnormal = clamp(dnormal, vec2(-1,-1), vec2(1, 1));
+            norm = dnormal;
+            vec4 gp = (transform * vec4(position, 0.0, 1.0)) + (pre_transform * vec4(dnormal*tesselation_width, 0.0, 0.0));
+            gl_Position = gp;
         }
     ";
 
@@ -356,6 +460,7 @@ fn main() {
 
         in vec3 v_bary;
         in float v_dist;
+        in vec2 norm;
 
         uniform float tesselation_width;
         const vec4 border_color = vec4(.5, .5, .5, 1);
@@ -365,7 +470,7 @@ fn main() {
         const float feather = .7;
         const float line_width = 0.7;
         const float line_smooth = .5;
-        const vec4 edge_color = vec4(0, 0, 0, 1);
+        vec4 edge_color = vec4(0, 0, 0, 1);
 
         float linearstep(float edge0, float edge1, float x) {
             return  clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -377,6 +482,14 @@ fn main() {
             d *= line_width;
             vec3 f = smoothstep(d, d+smth, v_bary);
             return min(min(f.x, f.y), f.z);
+        }
+
+        float center_factor() {
+            float d = fwidth(v_dist);
+            float smth = line_smooth * d;
+            d *= line_width;
+            float f = smoothstep(d, d+smth, abs(v_dist));
+            return f;
         }
 
         void main() {
@@ -397,6 +510,7 @@ fn main() {
             color *= ffactor;
 
             // color = mix(edge_color, color, edge_factor());
+            // color = mix(vec4(1.0, 1.0, 1.0, 1.0), color, center_factor());
             // color = vec4(.9, .9, .9, 1.0);
         }
     ";
@@ -404,12 +518,14 @@ fn main() {
     let shader_program;
     {
         let program = compile_shader(VERT_SHADER, FRAG_SHADER);
+        let pre_transform_str = CString::new("pre_transform").unwrap();
         let transform_str = CString::new("transform").unwrap();
         let width_str = CString::new("tesselation_width").unwrap();
         let fill_color_str = CString::new("fill_color").unwrap();
         unsafe {
             shader_program = LineProg{
                 program,
+                pre_transform: gl::GetUniformLocation(program, pre_transform_str.as_ptr()),
                 transform: gl::GetUniformLocation(program, transform_str.as_ptr()),
                 width: gl::GetUniformLocation(program, width_str.as_ptr()),
                 fill_color: gl::GetUniformLocation(program, fill_color_str.as_ptr()),
@@ -454,29 +570,27 @@ fn main() {
         }
     }
 
-    /*
-    unsafe {
-        gl::BindVertexArray(vao);
+    // unsafe {
+    //     gl::BindVertexArray(vao);
 
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-        gl::BufferData(gl::ARRAY_BUFFER, (vertecies.len() * std::mem::size_of::<f32>()) as _, vertecies.as_ptr().cast(), gl::STATIC_DRAW);
+    //     gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+    //     gl::BufferData(gl::ARRAY_BUFFER, (vertecies.len() * std::mem::size_of::<f32>()) as _, vertecies.as_ptr().cast(), gl::STATIC_DRAW);
 
-        gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, 0 as *const _);
-        gl::EnableVertexAttribArray(0);
-        gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, (3 * std::mem::size_of::<f32>()) as *const _);
-        gl::EnableVertexAttribArray(1);
+    //     gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, 0 as *const _);
+    //     gl::EnableVertexAttribArray(0);
+    //     gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, (3 * std::mem::size_of::<f32>()) as *const _);
+    //     gl::EnableVertexAttribArray(1);
 
-        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-        gl::BindVertexArray(0);
-    }
-    */
+    //     gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+    //     gl::BindVertexArray(0);
+    // }
     // let file = std::fs::File::open("aalborg.mvt").unwrap();
     // let tile = compile_tile(0, 0, 0, file).unwrap();
     let border = mapbox::pmtile::placeholder_tile(0, 0, 0);
 
     // -------------------------------------------
 
-    let mut projection = Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
+    let mut projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
     let mut hold: Option<Vector2<f64>> = None;
     let mut zoom = 0.0;
     let mut scale = 1.0;
@@ -517,7 +631,7 @@ fn main() {
         }
 
         if display.size_change {
-            projection = Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0);
+            projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
         }
 
         if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
@@ -544,7 +658,10 @@ fn main() {
         }
 
 
-        let camera_matrix = Mat4::translate(-viewport_pos.x, -viewport_pos.y).mul(&Mat4::scale_2d(scale as f64, scale as f64));
+        let mut transform = projection.clone();
+
+        transform.scale(&Vector2::new(scale as f64, scale as f64));
+        transform.translate(&Vector2::new(-viewport_pos.x, -viewport_pos.y));
 
         clear_color(Color(0.0, 0.1, 0.15, 1.0));
 
@@ -559,21 +676,19 @@ fn main() {
             gl::UseProgram(shader_program.program);
         }
 
-        let vp = camera_matrix.mul(&projection);
         for tid in &tiles.visible {
+            let mut tile_trans = transform.clone();
             let tile = tiles.active.get(tid).unwrap();
 
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
             // Transform the tilelocal coordinates to global coordinates
-            let tile_transform;
-            let tile_move;
             {
                 let xcoord = tile.x as f64 * grid_step;
                 let ycoord = tile.y as f64 * grid_step;
-                tile_move = Mat4::translate(xcoord, ycoord);
-                let tile_matrix = &Mat4::scale_2d(grid_step / tile.extent as f64, grid_step / tile.extent as f64).mul(&tile_move);
-                tile_transform = tile_matrix.mul(&vp);
+
+                tile_trans.translate(&Vector2::new(xcoord, ycoord));
+                tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
             }
             // Here we can truncate
 
@@ -584,7 +699,8 @@ fn main() {
                 let mut v2 = Vector2::new(tile.extent as f32, 0.0);
 
                 // The clipspace transform
-                let mvp2d: Mat3 = (&tile_transform).into();
+                let mvp3d: &Mat4 = (&tile_trans).into();
+                let mvp2d: Mat3 = mvp3d.into();
                 let mvp2d32: [f32; 9] = mvp2d.into();
                 v1.apply_transform(&mvp2d32);
                 v2.apply_transform(&mvp2d32);
@@ -613,13 +729,14 @@ fn main() {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
-            let tile_transform32: [f32; 16] = (&tile_transform).into();
-
-            fn render_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, color: Color, width: f32) {
+            fn render_poly(shader_program: &LineProg, projection32: Option<&GLTransform>, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, color: Color, width: f32) {
                 if let Some(layer) = layer {
                     unsafe {
                         gl::UseProgram(shader_program.program);
 
+                        if let Some(projection32) = projection32 {
+                            gl::UniformMatrix4fv(shader_program.pre_transform, 1, gl::TRUE, projection32.as_ptr());
+                        }
                         gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
                         gl::BindVertexArray(layer.vao);
 
@@ -633,28 +750,71 @@ fn main() {
                 }
             }
 
-            fn render_outlined_poly(shader_program: &LineProg, tile_transform32: &[f32; 16], layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, mut width: f32, scale_factor: f32, scale: f32) {
+            fn render_outlined_poly(shader_program: &LineProg, projection32: &GLTransform, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, width: f32, scale: f32) {
                 // Render the poly twice, one scaled up. The outline thickness is scaled according
                 // to the zoom to appear in screenspace. The poly itself is in world space
-                width *= scale_factor; // Transform the width to worldspace
+                // width *= scale_factor; // Transform the width to worldspace
                 // Transform to worldspace, then screenpace
-                let outline_width = (7000.0*scale_factor)/scale;
-                render_poly(&shader_program, &tile_transform32, &layer, fgcolor, width + outline_width);
-                render_poly(&shader_program, &tile_transform32, &layer, bgcolor, width);
+                let outline_width = 1.0/scale;
+                // render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, fgcolor, width + outline_width);
+                render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, bgcolor, width);
             }
 
-            render_poly(&shader_program, &tile_transform32, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.areas, Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.farmland, Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
-            render_poly(&shader_program, &tile_transform32, &tile.layers.water, Color(0.082, 0.173, 0.267, 1.0), 0.0);
+            fn render_outline_poly(shader_program: &LineProg, projection32: &GLTransform, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, width: f32, scale: f32) {
+                // Render the poly twice, one scaled up. The outline thickness is scaled according
+                // to the zoom to appear in screenspace. The poly itself is in world space
+                // width *= scale_factor; // Transform the width to worldspace
+                // Transform to worldspace, then screenpace
+                let outline_width = 1.0/scale;
+                render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, fgcolor, width + outline_width);
+                // render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, bgcolor, width);
+            }
 
-            let scale_factor = 1.0/grid_step as f32;
-            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.3, scale_factor, scale as f32);
-            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.4, scale_factor, scale as f32);
-            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.7, scale_factor, scale as f32);
-            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.9, scale_factor, scale as f32);
-            render_outlined_poly(&shader_program, &tile_transform32, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 1.0, scale_factor, scale as f32);
+            let mut projection = projection.clone();
+            projection.scale(&Vector2::new(scale, scale));
+            let gl_proj = projection.to_gl();
+            let gl_trans = tile_trans.to_gl();
+
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.areas, Color(0.07, 0.27, 0.37, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.farmland, Color(0.07, 0.27, 0.37, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.water, Color(0.082, 0.173, 0.267, 1.0), 0.0);
+
+            {
+                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003, scale as f32);
+                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004, scale as f32);
+                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007, scale as f32);
+                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009, scale as f32);
+                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.0002, scale as f32);
+
+                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003, scale as f32);
+                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004, scale as f32);
+                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007, scale as f32);
+                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009, scale as f32);
+                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.0002, scale as f32);
+            }
+
+            if let Some(roads) = &tile.layers.roads {
+                for label in &roads.labels {
+                    let mut text_transform = tile_trans.clone();
+                    text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));
+                    text_transform.rotate(label.orientation);
+                    let (min, mut max) = size_ascii(&font, label.text.as_bytes());
+
+                    text_transform.translate(&Vector2::new(-(max.x - min.x) / 2.0, (max.y - min.y) / 2.0));
+                    // draw_ascii((&text_transform).into(), &font, label.text.as_bytes());
+                    {
+                        max.subv2(&min);
+                        text_transform.translate(&Vector2::new(min.x, min.y));
+                        text_transform.scale(&Vector2::new(max.x/4096.0, max.y/4096.0));
+
+                        let mut projection = projection.clone();
+                        projection.rotate(label.orientation);
+                        render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, Color(1.0, 0.0, 0.0, 0.0), 0.000003);
+                    }
+                }
+            }
 
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
@@ -674,15 +834,24 @@ fn main() {
             // }
 
             {
-                let text_transform = Mat4::scale_2d(8.0, 8.0).mul(&tile_transform);
-                draw_ascii(&text_transform, &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes(), &Vector2::new(10.0, 16.0));
-                draw_ascii(&text_transform, &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes(), &Vector2::new(10.0, 32.0));
+                let mut text_transform = tile_trans.clone();
+                text_transform.scale(&Vector2::new(8.0, 8.0));
+                {
+                    let mut text_transform = text_transform.clone();
+                    text_transform.translate(&Vector2::new(10.0, 16.0));
+                    draw_ascii((&text_transform).into(), &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes());
+                }
+                {
+                    let mut text_transform = text_transform.clone();
+                    text_transform.translate(&Vector2::new(10.0, 32.0));
+                    draw_ascii((&text_transform).into(), &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes());
+                }
             }
         }
 
         // draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
         // draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
-        draw_ascii(&projection, &font, format!("Zoom level {} {}", scale, scale_level).as_bytes(), &Vector2::new(100.0, 100.0));
+        draw_ascii((&projection).into(), &font, format!("Zoom level {} {}", scale, scale_level).as_bytes());
 
         window.swap_buffers();
     }

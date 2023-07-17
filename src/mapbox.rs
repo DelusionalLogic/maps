@@ -786,7 +786,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
         fn read_geometry(features: Vec<pbuf::Message>) -> pbuf::Result<LineGeom> {
             let mut start = vec![];
-            let mut vert : Vec<LineVert> = vec![];
+            let mut vert = pmtile::Line::new();
 
             for mut reader in features {
                 while let Ok(field) = reader.next() {
@@ -803,7 +803,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                     let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                     cy += y as f32;
 
-                                    start.push(LineStart{pos: vert.len()});
+                                    start.push(LineStart{pos: vert.verts.len()});
                                     // Don't push any verts until the line is drawn
                                 } else if (cmd & 7) == 2 { // LineTo
                                     for i in 0..(cmd >> 3) {
@@ -812,7 +812,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let py = cy + y;
 
-                                        pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+                                        vert.add_point(crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
 
                                         cx = px;
                                         cy = py;
@@ -827,7 +827,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                     }
                 }
             }
-            return Ok(LineGeom { start, data: vert });
+            return Ok(LineGeom { start, data: vert.verts });
         }
 
         return Ok((
@@ -842,7 +842,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
     fn read_line_layer(mut reader: pbuf::Message) -> pbuf::Result<LineGeom> {
         let mut start = vec![];
-        let mut vert : Vec<LineVert> = vec![];
+        let mut vert = pmtile::Line::new();
 
         while let Ok(field) = reader.next() {
             match field {
@@ -867,7 +867,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                         cy += y as f32;
 
-                                        start.push(LineStart{pos: vert.len()});
+                                        start.push(LineStart{pos: vert.verts.len()});
                                         // Don't push any verts until the line is drawn
                                     } else if (cmd & 7) == 2 { // LineTo
                                         for i in 0..(cmd >> 3) {
@@ -876,7 +876,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                             let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                             let py = cy + y;
 
-                                            pmtile::add_point(&mut vert, crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+                                            vert.add_point(crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
 
                                             cx = px;
                                             cy = py;
@@ -896,7 +896,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
         return Ok(LineGeom{
             start,
-            data: vert,
+            data: vert.verts,
         });
     }
 
@@ -1259,7 +1259,7 @@ pub mod pmtile {
     pub trait Renderer {
         type Layer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::LineVert>) -> Self::Layer;
+        fn upload_layer(data: &Vec<crate::mapbox::LineVert>, labels: Vec<Label>) -> Self::Layer;
     }
 
     pub struct GL { }
@@ -1280,7 +1280,7 @@ pub mod pmtile {
     impl Renderer for GL {
         type Layer = Layer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::LineVert>) -> Layer {
+        fn upload_layer(data: &Vec<crate::mapbox::LineVert>, labels: Vec<Label>) -> Layer {
             let mut vao = 0;
             unsafe { gl::GenVertexArrays(1, &mut vao) };
 
@@ -1303,14 +1303,21 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            return Layer{ vao, vbo, size: data.len() };
+            return Layer{ vao, vbo, size: data.len(), labels };
         }
+    }
+
+    pub struct Label {
+        pub text: String,
+        pub pos: Vector2<f64>,
+        pub orientation: f64,
     }
 
     pub struct Layer {
         pub vao: u32,
         pub vbo: u32,
         pub size: usize,
+        pub labels: Vec<Label>,
     }
 
     pub struct Layers<R: Renderer> {
@@ -1362,58 +1369,70 @@ pub mod pmtile {
         }
     }
 
-    pub fn add_point(verts: &mut Vec<super::LineVert>, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool, add_point: bool) {
-        let cx = lv.x;
-        let cy = lv.y;
+    pub struct Line {
+        pub verts: Vec<super::LineVert>,
+    }
 
-        let mut ltov = v1.clone();
-        ltov.subv2(&lv);
-
-        let mut normal = ltov.clone();
-        normal.normal();
-        normal.unit();
-
-        let bend_norm_x;
-        let bend_norm_y;
-
-        if connect_previous {
-            let len = verts.len();
-
-            let last_normx = verts[len-2].norm_x;
-            let last_normy = verts[len-2].norm_y;
-
-            let mut join_x = last_normx + normal.x;
-            let mut join_y = last_normy + normal.y;
-            let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
-            join_x /= join_len;
-            join_y /= join_len;
-
-            let cos_angle = normal.x * join_x + normal.y * join_y;
-            let l = 1.0 / cos_angle;
-
-            bend_norm_x = join_x * l;
-            bend_norm_y = join_y * l;
-
-            verts[len-2].norm_x = bend_norm_x;
-            verts[len-2].norm_y = bend_norm_y;
-            verts[len-3].norm_x = -bend_norm_x;
-            verts[len-3].norm_y = -bend_norm_y;
-            verts[len-4].norm_x = bend_norm_x;
-            verts[len-4].norm_y = bend_norm_y;
-        } else {
-            bend_norm_x = normal.x;
-            bend_norm_y = normal.y;
+    impl Line {
+        pub fn new() -> Self {
+            return Line{
+                verts: Vec::new(),
+            };
         }
 
-        if add_point {
-            // Now construct the tris
-            verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
-            verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
-            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+        pub fn add_point(&mut self, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool, add_point: bool) {
+            let cx = lv.x;
+            let cy = lv.y;
 
-            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
-            verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
-            verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+            let mut ltov = v1.clone();
+            ltov.subv2(&lv);
+
+            let mut normal = ltov.clone();
+            normal.normal();
+            normal.unit();
+
+            let bend_norm_x;
+            let bend_norm_y;
+
+            if connect_previous {
+                let len = self.verts.len();
+
+                let last_normx = self.verts[len-2].norm_x;
+                let last_normy = self.verts[len-2].norm_y;
+
+                let mut join_x = last_normx + normal.x;
+                let mut join_y = last_normy + normal.y;
+                let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
+                join_x /= join_len;
+                join_y /= join_len;
+
+                let cos_angle = normal.x * join_x + normal.y * join_y;
+                let l = 1.0 / cos_angle;
+
+                bend_norm_x = join_x * l;
+                bend_norm_y = join_y * l;
+
+                self.verts[len-4].norm_x = bend_norm_x;
+                self.verts[len-4].norm_y = bend_norm_y;
+                self.verts[len-3].norm_x = -bend_norm_x;
+                self.verts[len-3].norm_y = -bend_norm_y;
+                self.verts[len-2].norm_x = bend_norm_x;
+                self.verts[len-2].norm_y = bend_norm_y;
+            } else {
+                bend_norm_x = normal.x;
+                bend_norm_y = normal.y;
+            }
+
+            if add_point {
+                // Now construct the tris
+                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+
+                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+            }
         }
     }
 
@@ -1539,11 +1558,39 @@ pub mod pmtile {
                 offset += polys_end - polys_start;
             }
 
-            return R::upload_layer(&tri_polys);
+            return R::upload_layer(&tri_polys, Vec::new());
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom) -> R::Layer {
-            return R::upload_layer(&raw_tile.data);
+            let mut labels = Vec::new();
+            // Generate labels
+            for start in &raw_tile.start {
+                let p1 = raw_tile.data[start.pos+1];
+                let p2 = raw_tile.data[start.pos+2];
+                let v1 = Vector2 {
+                    x: p1.x as f64,
+                    y: p1.y as f64,
+                };
+                let mut v2 = Vector2 {
+                    x: p2.x as f64,
+                    y: p2.y as f64,
+                };
+                v2.subv2(&v1);
+                let mut orientation = v2.angle();
+                if orientation > std::f64::consts::TAU/4.0 {
+                    orientation -= std::f64::consts::TAU/2.0;
+                } else if orientation < -std::f64::consts::TAU/4.0 {
+                    orientation += std::f64::consts::TAU/2.0;
+                }
+                labels.push(Label{
+                    text: "Hello sailor!".to_owned(),
+                    pos: v1,
+                    orientation,
+                });
+            }
+
+            // dbg!(&raw_tile.data);
+            return R::upload_layer(&raw_tile.data, labels);
         }
 
         let layers = Layers{
@@ -1573,31 +1620,31 @@ pub mod pmtile {
 
     static mut TILE_NUM  : u64 = 0;
     pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile<GL> {
-        let mut verts: Vec<super::LineVert> = vec![];
+        let mut line = Line::new();
 
         let mut lv = Vector2::new(0.0, 0.0);
 
         {
             let nv = Vector2::new(0.0, 4096.0);
-            add_point(&mut verts, lv, nv, false, true);
+            line.add_point(lv, nv, false, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(4096.0, 4096.0);
-            add_point(&mut verts, lv, nv, true, true);
+            line.add_point(lv, nv, true, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(4096.0, 0.0);
-            add_point(&mut verts, lv, nv, true, true);
+            line.add_point(lv, nv, true, true);
             lv = nv;
         }
 
         {
             let nv = Vector2::new(0.0, 0.0);
-            add_point(&mut verts, lv, nv, true, true);
+            line.add_point(lv, nv, true, true);
         }
 
         let mut vao = 0;
@@ -1610,7 +1657,7 @@ pub mod pmtile {
             gl::BindVertexArray(vao);
 
             gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-            gl::BufferData(gl::ARRAY_BUFFER, (verts.len() * std::mem::size_of::<super::LineVert>()) as _, verts.as_ptr().cast(), gl::STATIC_DRAW);
+            gl::BufferData(gl::ARRAY_BUFFER, (line.verts.len() * std::mem::size_of::<super::LineVert>()) as _, line.verts.as_ptr().cast(), gl::STATIC_DRAW);
 
             gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
             gl::EnableVertexAttribArray(0);
@@ -1624,7 +1671,7 @@ pub mod pmtile {
         }
 
         let layers = Layers{
-            roads: Some(Layer{ vao, vbo, size: verts.len() }),
+            roads: Some(Layer{ vao, vbo, size: line.verts.len(), labels: Vec::new() }),
             ..Default::default()
         };
 
@@ -1896,7 +1943,7 @@ pub mod pmtile {
                         if pval + runlength <= tid {
                             return None;
                         }
-                        assert!(eoffset + (elen as u64) < self.tile_len as u64);
+                        assert!(eoffset + (elen as u64) <= self.tile_len as u64);
 
                         let tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
                         return Some(compile_tile(x, y, level, tile_slice).unwrap());
@@ -1980,6 +2027,140 @@ pub mod pmtile {
         fn tileid_third_tile_under_outermost() {
             let id = coords_to_id(1, 1, 1);
             assert_eq!(id, 3);
+        }
+
+        #[test]
+        fn build_straight_line() {
+            let mut line = Line::new();
+
+            let v1 = Vector2::new(0.0, 0.0);
+            let v2 = Vector2::new(0.0, 1.0);
+            let v3 = Vector2::new(0.0, 2.0);
+
+            line.add_point(v1, v2, false, true);
+            line.add_point(v2, v3, true, true);
+
+            assert_eq!(12, line.verts.len());
+            {
+                let vx = line.verts[0].x;
+                let vy = line.verts[0].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(0.0, vy);
+                let nx = line.verts[0].norm_x;
+                let ny = line.verts[0].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[1].x;
+                let vy = line.verts[1].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(0.0, vy);
+                let nx = line.verts[1].norm_x;
+                let ny = line.verts[1].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[2].x;
+                let vy = line.verts[2].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[2].norm_x;
+                let ny = line.verts[2].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[3].x;
+                let vy = line.verts[3].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[3].norm_x;
+                let ny = line.verts[3].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[4].x;
+                let vy = line.verts[4].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[4].norm_x;
+                let ny = line.verts[4].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[5].x;
+                let vy = line.verts[5].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(0.0, vy);
+                let nx = line.verts[5].norm_x;
+                let ny = line.verts[5].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[6].x;
+                let vy = line.verts[6].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[6].norm_x;
+                let ny = line.verts[6].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[7].x;
+                let vy = line.verts[7].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[7].norm_x;
+                let ny = line.verts[7].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[8].x;
+                let vy = line.verts[8].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(2.0, vy);
+                let nx = line.verts[8].norm_x;
+                let ny = line.verts[8].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[9].x;
+                let vy = line.verts[9].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(2.0, vy);
+                let nx = line.verts[9].norm_x;
+                let ny = line.verts[9].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[10].x;
+                let vy = line.verts[10].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(2.0, vy);
+                let nx = line.verts[10].norm_x;
+                let ny = line.verts[10].norm_y;
+                assert_eq!(1.0, nx);
+                assert_eq!(0.0, ny);
+            }
+            {
+                let vx = line.verts[11].x;
+                let vy = line.verts[11].y;
+                assert_eq!(0.0, vx);
+                assert_eq!(1.0, vy);
+                let nx = line.verts[11].norm_x;
+                let ny = line.verts[11].norm_y;
+                assert_eq!(-1.0, nx);
+                assert_eq!(0.0, ny);
+            }
         }
     }
 }

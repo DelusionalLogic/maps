@@ -135,6 +135,16 @@ impl Vector2<f32> {
         self.x *= other.x;
         self.y *= other.y;
     }
+
+    pub fn min(&mut self, other: &Self) {
+        self.x = self.x.min(other.x);
+        self.y = self.y.min(other.y);
+    }
+
+    pub fn max(&mut self, other: &Self) {
+        self.x = self.x.max(other.x);
+        self.y = self.y.max(other.y);
+    }
 }
 
 impl Vector2<f64> {
@@ -147,13 +157,17 @@ impl Vector2<f64> {
         self.x *= other.x;
         self.y *= other.y;
     }
+
+    pub fn angle(&mut self) -> f64 {
+        return f64::atan2(self.y, self.x);
+    }
 }
 
 pub struct Mat4 {
     pub data: [f64; 16],
 }
 
-const MAT4_IDENTITY: Mat4 = Mat4{ data: [
+pub const MAT4_IDENTITY: Mat4 = Mat4{ data: [
            1.0,    0.0,    0.0, 0.0,
            0.0,    1.0,    0.0, 0.0,
            0.0,    0.0,    1.0, 0.0,
@@ -185,6 +199,15 @@ impl Mat4 {
         ]};
     }
 
+    pub fn rotate_2d(angle: f64) -> Self {
+        return Mat4{ data: [
+            angle.cos(), -angle.sin(),        0.0, 0.0,
+            angle.sin(),  angle.cos(),        0.0, 0.0,
+                    0.0,          0.0,        1.0, 0.0,
+                    0.0,          0.0,        0.0, 1.0,
+        ]};
+    }
+
     pub fn translate(x: f64, y: f64) -> Self {
         return Mat4{ data: [
                1.0,    0.0,    0.0,   x,
@@ -201,16 +224,24 @@ impl Mat4 {
             let row_offset = row * 4;
             for column in 0..4 {
                 out[row_offset + column] =
-                    (other.data[row_offset + 0] * self.data[column + 0]) +
-                    (other.data[row_offset + 1] * self.data[column + 4]) +
-                    (other.data[row_offset + 2] * self.data[column + 8]) +
-                    (other.data[row_offset + 3] * self.data[column + 12]);
+                    (self.data[row_offset + 0] * other.data[column + 0]) +
+                    (self.data[row_offset + 1] * other.data[column + 4]) +
+                    (self.data[row_offset + 2] * other.data[column + 8]) +
+                    (self.data[row_offset + 3] * other.data[column + 12]);
             }
         }
 
         return Mat4{
             data: out
         };
+    }
+}
+
+impl Clone for Mat4 {
+    fn clone(&self) -> Self {
+        return Mat4{
+            data: self.data.clone(),
+        }
     }
 }
 
