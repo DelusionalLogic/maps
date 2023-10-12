@@ -1408,16 +1408,23 @@ pub mod pmtile {
 
                 let cos_angle = normal.x * join_x + normal.y * join_y;
                 let l = 1.0 / cos_angle;
+                // Don't do a miter for very sharp corners
+                if l < 2.0 {
+                    bend_norm_x = join_x * l;
+                    bend_norm_y = join_y * l;
 
-                bend_norm_x = join_x * l;
-                bend_norm_y = join_y * l;
-
-                self.verts[len-4].norm_x = bend_norm_x;
-                self.verts[len-4].norm_y = bend_norm_y;
-                self.verts[len-3].norm_x = -bend_norm_x;
-                self.verts[len-3].norm_y = -bend_norm_y;
-                self.verts[len-2].norm_x = bend_norm_x;
-                self.verts[len-2].norm_y = bend_norm_y;
+                    self.verts[len-4].norm_x = bend_norm_x;
+                    self.verts[len-4].norm_y = bend_norm_y;
+                    self.verts[len-3].norm_x = -bend_norm_x;
+                    self.verts[len-3].norm_y = -bend_norm_y;
+                    self.verts[len-2].norm_x = bend_norm_x;
+                    self.verts[len-2].norm_y = bend_norm_y;
+                } else {
+                    // @HACK @COMPLETE: Do another type  of join here. Right now it's just
+                    // disconnected
+                    bend_norm_x = normal.x;
+                    bend_norm_y = normal.y;
+                }
             } else {
                 bend_norm_x = normal.x;
                 bend_norm_y = normal.y;

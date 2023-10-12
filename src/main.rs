@@ -682,14 +682,11 @@ fn main() {
 
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
+            let xcoord = tile.x as f64 * grid_step;
+            let ycoord = tile.y as f64 * grid_step;
             // Transform the tilelocal coordinates to global coordinates
-            {
-                let xcoord = tile.x as f64 * grid_step;
-                let ycoord = tile.y as f64 * grid_step;
-
-                tile_trans.translate(&Vector2::new(xcoord, ycoord));
-                tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
-            }
+            tile_trans.translate(&Vector2::new(xcoord, ycoord));
+            tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
             // Here we can truncate
 
 
@@ -729,7 +726,7 @@ fn main() {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
-            fn render_poly(shader_program: &LineProg, projection32: Option<&GLTransform>, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, color: Color, width: f32) {
+            fn render_poly(shader_program: &LineProg, projection32: Option<&GLTransform>, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, color: &Color, width: f32) {
                 if let Some(layer) = layer {
                     unsafe {
                         gl::UseProgram(shader_program.program);
@@ -742,7 +739,7 @@ fn main() {
 
                         gl::Uniform1f(shader_program.width, width);
                         let Color(r, g, b, a) = color;
-                        gl::Uniform4f(shader_program.fill_color, r, g, b, a);
+                        gl::Uniform4f(shader_program.fill_color, *r, *g, *b, *a);
                         gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
 
                         gl::BindVertexArray(0);
@@ -750,49 +747,35 @@ fn main() {
                 }
             }
 
-            fn render_outlined_poly(shader_program: &LineProg, projection32: &GLTransform, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, width: f32, scale: f32) {
-                // Render the poly twice, one scaled up. The outline thickness is scaled according
-                // to the zoom to appear in screenspace. The poly itself is in world space
-                // width *= scale_factor; // Transform the width to worldspace
-                // Transform to worldspace, then screenpace
-                let outline_width = 1.0/scale;
-                // render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, fgcolor, width + outline_width);
-                render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, bgcolor, width);
-            }
+            let (gl_proj, gl_trans) = {
+                let mut projection = projection.clone();
+                projection.scale(&Vector2::new(scale, scale));
+                (projection.to_gl(), tile_trans.to_gl())
+            };
 
-            fn render_outline_poly(shader_program: &LineProg, projection32: &GLTransform, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, fgcolor: Color, bgcolor: Color, width: f32, scale: f32) {
-                // Render the poly twice, one scaled up. The outline thickness is scaled according
-                // to the zoom to appear in screenspace. The poly itself is in world space
-                // width *= scale_factor; // Transform the width to worldspace
-                // Transform to worldspace, then screenpace
-                let outline_width = 1.0/scale;
-                render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, fgcolor, width + outline_width);
-                // render_poly(&shader_program, Some(projection32), &tile_transform32, &layer, bgcolor, width);
-            }
-
-            let mut projection = projection.clone();
-            projection.scale(&Vector2::new(scale, scale));
-            let gl_proj = projection.to_gl();
-            let gl_trans = tile_trans.to_gl();
-
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.earth, Color(0.1, 0.3, 0.4, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.areas, Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.farmland, Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.buildings, Color(0.0, 0.2, 0.3, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.water, Color(0.082, 0.173, 0.267, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.earth, &Color(0.1, 0.3, 0.4, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.areas, &Color(0.07, 0.27, 0.37, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0);
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0);
 
             {
-                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003, scale as f32);
-                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004, scale as f32);
-                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007, scale as f32);
-                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009, scale as f32);
-                render_outline_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.0002, scale as f32);
+                let road_layers = [
+                    (&tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003),
+                    (&tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004),
+                    (&tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007),
+                    (&tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009),
+                    (&tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00020),
+                ];
 
-                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003, scale as f32);
-                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004, scale as f32);
-                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007, scale as f32);
-                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009, scale as f32);
-                render_outlined_poly(&shader_program, &gl_proj, &gl_trans, &tile.layers.highways, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.0002, scale as f32);
+                for (layer, bgcolor, _, width)  in &road_layers {
+                    let outline_width = 1.0/scale;
+                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &layer, bgcolor, *width + outline_width as f32);
+                }
+
+                for (layer, _, fgcolor, width)  in &road_layers {
+                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &layer, fgcolor, *width);
+                }
             }
 
             if let Some(roads) = &tile.layers.roads {
@@ -802,8 +785,10 @@ fn main() {
                     text_transform.rotate(label.orientation);
                     let (min, mut max) = size_ascii(&font, label.text.as_bytes());
 
+                    text_transform.scale(&Vector2::new(150000.0/scale, 150000.0/scale));
+                    // text_transform.scale(&Vector2::new(150000.0, 150000.0));
                     text_transform.translate(&Vector2::new(-(max.x - min.x) / 2.0, (max.y - min.y) / 2.0));
-                    // draw_ascii((&text_transform).into(), &font, label.text.as_bytes());
+                    draw_ascii((&text_transform).into(), &font, label.text.as_bytes());
                     {
                         max.subv2(&min);
                         text_transform.translate(&Vector2::new(min.x, min.y));
@@ -811,7 +796,7 @@ fn main() {
 
                         let mut projection = projection.clone();
                         projection.rotate(label.orientation);
-                        render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, Color(1.0, 0.0, 0.0, 0.0), 0.000003);
+                        render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, &Color(1.0, 0.0, 0.0, 0.0), 0.000003);
                     }
                 }
             }
@@ -849,9 +834,13 @@ fn main() {
             }
         }
 
-        // draw_ascii(&projection, &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes(), &Vector2::new(100.0, 100.0));
-        // draw_ascii(&projection, &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), &Vector2::new(100.0, 160.0));
-        draw_ascii((&projection).into(), &font, format!("Zoom level {} {}", scale, scale_level).as_bytes());
+        let mut text_transform = projection.clone();
+        text_transform.translate(&Vector2::new(20.0, 20.0));
+        draw_ascii((&text_transform).into(), &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes());
+        text_transform.translate(&Vector2::new(0.0, 16.0));
+        draw_ascii((&text_transform).into(), &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), );
+        text_transform.translate(&Vector2::new(0.0, 16.0));
+        draw_ascii((&text_transform).into(), &font, format!("Zoom level {} {}", scale, scale_level).as_bytes());
 
         window.swap_buffers();
     }
