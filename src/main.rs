@@ -778,7 +778,7 @@ fn main() {
                 }
             }
 
-            if let Some(roads) = &tile.layers.roads {
+            if let Some(roads) = &tile.layers.highways {
                 for label in &roads.labels {
                     let mut text_transform = tile_trans.clone();
                     text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));

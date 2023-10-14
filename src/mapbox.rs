@@ -1571,19 +1571,65 @@ pub mod pmtile {
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom) -> R::Layer {
             let mut labels = Vec::new();
             // Generate labels
-            for start in &raw_tile.start {
-                let p1 = raw_tile.data[start.pos+1];
-                let p2 = raw_tile.data[start.pos+2];
-                let v1 = Vector2 {
-                    x: p1.x as f64,
-                    y: p1.y as f64,
+            for i in 0..raw_tile.start.len() {
+                let start = raw_tile.start[i].pos;
+                let end = if i+1 < raw_tile.start.len() {
+                    raw_tile.start[i+1].pos
+                } else {
+                    raw_tile.data.len()
                 };
-                let mut v2 = Vector2 {
-                    x: p2.x as f64,
-                    y: p2.y as f64,
-                };
-                v2.subv2(&v1);
-                let mut orientation = v2.angle();
+
+                let mut len = 0.0;
+                for j in 0..(end-start)/6 {
+                    let p1 = raw_tile.data[start + j*6];
+                    let p2 = raw_tile.data[start + j*6 + 2];
+
+                    let v1 = Vector2 {
+                        x: p1.x as f64,
+                        y: p1.y as f64,
+                    };
+                    let mut v2 = Vector2 {
+                        x: p2.x as f64,
+                        y: p2.y as f64,
+                    };
+                    v2.subv2(&v1);
+                    len += v2.len_squared();
+                }
+
+                len /= 2.0;
+
+                let mut mid = Vector2::new(0.0, 0.0);
+                let mut orientation = 0.0;
+                for j in 0..(end-start)/6 {
+                    let p1 = raw_tile.data[start + j*6];
+                    let p2 = raw_tile.data[start + j*6 + 2];
+
+                    let mut v1 = Vector2 {
+                        x: p1.x as f64,
+                        y: p1.y as f64,
+                    };
+                    let mut v2 = Vector2 {
+                        x: p2.x as f64,
+                        y: p2.y as f64,
+                    };
+                    v2.subv2(&v1);
+                    orientation = v2.angle();
+                    let segment_len = v2.len_squared();
+                    if len > segment_len {
+                        len -= segment_len;
+                        continue;
+                    }
+
+                    let ratio = len / segment_len;
+
+                    v2.mulf(ratio);
+
+                    v1.addv2(&v2);
+                    mid = v1;
+                    break;
+                }
+
+                // Rotate the labels if they would be upside down
                 if orientation > std::f64::consts::TAU/4.0 {
                     orientation -= std::f64::consts::TAU/2.0;
                 } else if orientation < -std::f64::consts::TAU/4.0 {
@@ -1591,7 +1637,7 @@ pub mod pmtile {
                 }
                 labels.push(Label{
                     text: "Hello sailor!".to_owned(),
-                    pos: v1,
+                    pos: mid,
                     orientation,
                 });
             }
