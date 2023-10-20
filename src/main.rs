@@ -785,8 +785,8 @@ fn main() {
                     text_transform.rotate(label.orientation);
                     let (min, mut max) = size_ascii(&font, label.text.as_bytes());
 
-                    text_transform.scale(&Vector2::new(150000.0/scale, 150000.0/scale));
-                    // text_transform.scale(&Vector2::new(150000.0, 150000.0));
+                    text_transform.scale(&Vector2::new(600.0/grid_step/tile.extent as f64, 600.0/grid_step/tile.extent as f64));
+
                     text_transform.translate(&Vector2::new(-(max.x - min.x) / 2.0, (max.y - min.y) / 2.0));
                     draw_ascii((&text_transform).into(), &font, label.text.as_bytes());
                     {
@@ -794,9 +794,9 @@ fn main() {
                         text_transform.translate(&Vector2::new(min.x, min.y));
                         text_transform.scale(&Vector2::new(max.x/4096.0, max.y/4096.0));
 
-                        let mut projection = projection.clone();
-                        projection.rotate(label.orientation);
-                        render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, &Color(1.0, 0.0, 0.0, 0.0), 0.000003);
+                        // let mut projection = projection.clone();
+                        // projection.rotate(label.orientation);
+                        // render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, &Color(1.0, 0.0, 0.0, 1.0), 0.000003);
                     }
                 }
             }
