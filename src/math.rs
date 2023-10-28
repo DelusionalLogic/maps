@@ -75,6 +75,15 @@ impl <T> Vector2<T>
 impl <T> Vector2<T>
     where T: std::ops::Neg<Output = T> + Copy {
 
+    pub fn negate(&mut self) {
+        self.x = -self.x;
+        self.y = -self.y;
+    }
+}
+
+impl <T> Vector2<T>
+    where T: std::ops::Neg<Output = T> + Copy {
+
     pub fn normal(&mut self) {
         let x = self.x;
         self.x = self.y;

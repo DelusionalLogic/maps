@@ -1446,7 +1446,7 @@ pub mod pmtile {
     fn compile_tile<R: Renderer>(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
         let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
-        fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom) -> R::Layer {
+        fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, z: u8) -> R::Layer {
             let poly_start = &raw_tile.start;
             let polys = &mut raw_tile.data;
             let mut tri_polys : Vec<super::LineVert> = vec![];
@@ -1568,7 +1568,7 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom) -> R::Layer {
+        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, z: u8) -> R::Layer {
             let mut labels = Vec::new();
             // Generate labels
             for i in 0..raw_tile.start.len() {
@@ -1579,6 +1579,7 @@ pub mod pmtile {
                     raw_tile.data.len()
                 };
 
+                // Calculate the length of the line
                 let mut len = 0.0;
                 for j in 0..(end-start)/6 {
                     let p1 = raw_tile.data[start + j*6];
@@ -1600,11 +1601,12 @@ pub mod pmtile {
 
                 let mut mid = Vector2::new(0.0, 0.0);
                 let mut orientation = 0.0;
+                // Walk the line until we reach the midpoint. Then place the label
                 for j in 0..(end-start)/6 {
                     let p1 = raw_tile.data[start + j*6];
                     let p2 = raw_tile.data[start + j*6 + 2];
 
-                    let mut v1 = Vector2 {
+                    mid = Vector2 {
                         x: p1.x as f64,
                         y: p1.y as f64,
                     };
@@ -1612,10 +1614,11 @@ pub mod pmtile {
                         x: p2.x as f64,
                         y: p2.y as f64,
                     };
-                    v2.subv2(&v1);
+                    v2.subv2(&mid);
                     orientation = v2.angle();
                     let segment_len = v2.len_squared();
                     if len > segment_len {
+                        // The placement isn't on this segment
                         len -= segment_len;
                         continue;
                     }
@@ -1624,8 +1627,7 @@ pub mod pmtile {
 
                     v2.mulf(ratio);
 
-                    v1.addv2(&v2);
-                    mid = v1;
+                    mid.addv2(&v2);
                     break;
                 }
 
@@ -1635,8 +1637,9 @@ pub mod pmtile {
                 } else if orientation < -std::f64::consts::TAU/4.0 {
                     orientation += std::f64::consts::TAU/2.0;
                 }
+
                 labels.push(Label{
-                    text: "Hello sailor!".to_owned(),
+                    text: "Hello sailog!".to_owned(),
                     pos: mid,
                     orientation,
                 });
@@ -1647,16 +1650,16 @@ pub mod pmtile {
         }
 
         let layers = Layers{
-            earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads)),
-            highways: Some(compile_line_layer::<R>(&raw_tile.highways)),
-            major: Some(compile_line_layer::<R>(&raw_tile.major)),
-            medium: Some(compile_line_layer::<R>(&raw_tile.medium)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor)),
-            buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings)),
-            water: Some(compile_polygon_layer::<R>(&mut raw_tile.water)),
-            farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland)),
-            areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas)),
+            earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads, z)),
+            highways: Some(compile_line_layer::<R>(&raw_tile.highways, z)),
+            major: Some(compile_line_layer::<R>(&raw_tile.major, z)),
+            medium: Some(compile_line_layer::<R>(&raw_tile.medium, z)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor, z)),
+            buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
+            water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
+            farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
+            areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file

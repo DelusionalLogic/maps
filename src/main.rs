@@ -64,6 +64,11 @@ impl Transform {
         self.apply(&Mat4::scale_2d(scale.x.into(), scale.y.into()));
     }
 
+    pub fn mat(&self) -> &Mat4 {
+        let (primary, _) = self.split();
+        return &self.mats[primary];
+    }
+
     pub fn to_gl(&self) -> GLTransform {
         let (primary, _) = self.split();
         return (&self.mats[primary]).into();
@@ -159,9 +164,6 @@ struct Character {
     bearing: Vector2<f32>,
     advance: f32,
     texture: u32,
-
-    min: Vector2<f32>,
-    max: Vector2<f32>,
 }
 
 struct FontMap {
@@ -237,19 +239,11 @@ fn load_font() -> FontMap {
             );
         };
 
-        let metrics = glyph.metrics();
-
-        let min = Vector2::new(metrics.horiBearingX as f32/64.0, -metrics.horiBearingY as f32/64.0);
-        let mut max = Vector2::new(metrics.width as f32/64.0, metrics.height as f32/64.0);
-        max.addv2(&min);
-
         chars.push(Character {
             size,
             bearing,
             advance,
             texture: textures[i],
-            min,
-            max,
         });
     }
 
@@ -335,22 +329,22 @@ fn size_ascii(font: &FontMap, text: &[u8]) -> (Vector2<f32>, Vector2<f32>) {
 
     for c in text {
         let char = &font.chars[*c as usize];
-        advance += char.advance;
 
         let mut char_min = Vector2::new(advance as f32, 0.0);
-        char_min.addv2(&char.min);
+        char_min.addv2(&char.bearing);
 
-        let mut char_max = Vector2::new(advance as f32, 0.0);
-        char_max.addv2(&char.max);
+        let mut char_max = char_min.clone();
+        char_max.addv2(&char.size);
 
         min.min(&char_min);
         max.max(&char_max);
+        advance += char.advance;
     }
 
     return (min, max);
 }
 
-fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8]) {
+fn draw_ascii(projection: Transform, font: &FontMap, text: &[u8]) {
     unsafe {
         gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
         gl::Enable(gl::BLEND);
@@ -365,11 +359,13 @@ fn draw_ascii(projection: &Mat4, font: &FontMap, text: &[u8]) {
     for c in text {
         let char = &font.chars[*c as usize];
 
-        let mut pos = pen;
+        let mut pos = pen.clone();
         pos.addv2(&char.bearing);
 
-        let mvp = projection.mul(&Mat4::translate(pos.x as f64, pos.y as f64)).mul(&Mat4::scale_2d(char.size.x as f64, char.size.y as f64));
-        let mvp32: [f32; 16] = mvp.into();
+        let mut projection = projection.clone();
+        projection.translate(&pos);
+        projection.scale(&char.size);
+        let mvp32: [f32; 16] = projection.to_gl();
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, char.texture);
@@ -783,20 +779,43 @@ fn main() {
                     let mut text_transform = tile_trans.clone();
                     text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));
                     text_transform.rotate(label.orientation);
-                    let (min, mut max) = size_ascii(&font, label.text.as_bytes());
+                    let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
 
-                    text_transform.scale(&Vector2::new(600.0/grid_step/tile.extent as f64, 600.0/grid_step/tile.extent as f64));
+                    min.mulf(600.0);
+                    min.divf(grid_step as f32*tile.extent as f32);
+                    max.mulf(600.0);
+                    max.divf(grid_step as f32*tile.extent as f32);
 
-                    text_transform.translate(&Vector2::new(-(max.x - min.x) / 2.0, (max.y - min.y) / 2.0));
-                    draw_ascii((&text_transform).into(), &font, label.text.as_bytes());
+
+                    let offset = Vector2::new(-max.x / 2.0, -min.y / 2.0);
+
+                    // Remove labels that overlap a tile boundary
                     {
-                        max.subv2(&min);
-                        text_transform.translate(&Vector2::new(min.x, min.y));
+                        let awidth = max.x as f64 * label.orientation.cos().abs() + max.y as f64 * label.orientation.sin().abs();
+                        let aheight = max.x as f64 * label.orientation.sin().abs() + max.y as f64 * label.orientation.cos().abs();
+
+                        if label.pos.x < awidth/2.0 || label.pos.x > 4096.0-awidth/2.0 {
+                            continue;
+                        }
+                        if label.pos.y < aheight/2.0 || label.pos.y > 4096.0-aheight/2.0 {
+                            continue;
+                        }
+                    }
+
+                    {
+                        let mut text_transform = text_transform.clone();
+                        text_transform.translate(&offset);
+                        text_transform.scale(&Vector2::new(600.0/grid_step/tile.extent as f64, 600.0/grid_step/tile.extent as f64));
+                        draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
+                    }
+                    {
+                        text_transform.translate(&offset);
+                        // text_transform.translate(&Vector2::new(min.x, min.y));
                         text_transform.scale(&Vector2::new(max.x/4096.0, max.y/4096.0));
 
-                        // let mut projection = projection.clone();
-                        // projection.rotate(label.orientation);
-                        // render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, &Color(1.0, 0.0, 0.0, 1.0), 0.000003);
+                        let mut projection = projection.clone();
+                        projection.rotate(label.orientation);
+                        render_poly(&shader_program, Some(&projection.to_gl()), &text_transform.to_gl(), &border.layers.roads, &Color(1.0, 0.0, 0.0, 1.0), 1.0);
                     }
                 }
             }
@@ -824,23 +843,23 @@ fn main() {
                 {
                     let mut text_transform = text_transform.clone();
                     text_transform.translate(&Vector2::new(10.0, 16.0));
-                    draw_ascii((&text_transform).into(), &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes());
+                    draw_ascii(text_transform.clone(), &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes());
                 }
                 {
                     let mut text_transform = text_transform.clone();
                     text_transform.translate(&Vector2::new(10.0, 32.0));
-                    draw_ascii((&text_transform).into(), &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes());
+                    draw_ascii(text_transform.clone(), &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes());
                 }
             }
         }
 
         let mut text_transform = projection.clone();
         text_transform.translate(&Vector2::new(20.0, 20.0));
-        draw_ascii((&text_transform).into(), &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes());
+        draw_ascii(text_transform.clone(), &font, format!("Pos {} {}, size {} {}", viewport_pos.x, viewport_pos.y, display.width as f64/scale, display.height as f64/scale).as_bytes());
         text_transform.translate(&Vector2::new(0.0, 16.0));
-        draw_ascii((&text_transform).into(), &font, format!("Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), );
+        draw_ascii(text_transform.clone(), &font, format!("ggg Pos {} {}", mouse_world.x, mouse_world.y).as_bytes(), );
         text_transform.translate(&Vector2::new(0.0, 16.0));
-        draw_ascii((&text_transform).into(), &font, format!("Zoom level {} {}", scale, scale_level).as_bytes());
+        draw_ascii(text_transform.clone(), &font, format!("Zoom level {} {}", scale, scale_level).as_bytes());
 
         window.swap_buffers();
     }
