@@ -1,3 +1,5 @@
+use std::collections::{BinaryHeap, HashMap};
+
 pub mod pbuf {
     use std::io::Read;
 
@@ -511,6 +513,7 @@ pub struct LineStart {
 
 pub struct LineGeom {
     start: Vec<LineStart>,
+    name: Vec<Option<String>>,
     data: Vec<LineVert>,
 }
 
@@ -654,6 +657,74 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     }
 
+    fn lookup_values(reader: &mut pbuf::Message, values: &Vec<Option<u64>>, order: &Vec<usize>) -> pbuf::Result<Vec<Option<String>>> {
+        let mut oit = order.iter().peekable();
+
+        let mut value_ids = Vec::with_capacity(values.len());
+        for _ in 0..values.len() {
+            value_ids.push(None);
+        }
+
+        while let Some(i) = oit.peek() {
+            if values[**i].is_some() {
+                break;
+            }
+
+            oit.next();
+        }
+
+        let mut cursor = 0;
+        while let Some(i) = oit.next() {
+            // We skipped all the Nones
+            let value = values[*i].unwrap();
+
+            while cursor < value {
+                let field = reader.next()?;
+                match field {
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { panic!(); }
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                        reader.skip(pbuf::WireType::Len)?;
+                        cursor += 1;
+                    },
+                    x => { reader.skip(x.wtype)?; }
+                }
+            }
+
+            while let Ok(field) = reader.next() {
+                match field {
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { panic!(); }
+                    pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                        reader.enter_message()?;
+                        match reader.next().unwrap() {
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
+                                value_ids[*i] = Some(reader.read_string()?);
+                            }
+                            _ => { panic!("Incorrect name value type"); },
+                        }
+
+                        reader.exit_message()?;
+                        break;
+                    },
+                    x => { reader.skip(x.wtype)?; },
+                }
+            }
+            cursor += 1;
+
+            while let Some(i2) = oit.peek() {
+                // We skipped all the Nones
+                let n_value = values[**i2].unwrap();
+                if n_value == value {
+                    value_ids[**i2] = value_ids[*i].clone();
+                    oit.next();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        return Ok(value_ids);
+    }
+
     fn scan_for_keys_and_values(reader: &mut pbuf::Message, keys: &Vec<&str>, values: &Vec<&str>) -> pbuf::Result<(Vec<Option<u64>>, Vec<Option<u64>>)> {
         let mut key_count = 0;
         let mut value_count = 0;
@@ -712,6 +783,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         // the keys/values we care about, then we have to do a double pass on all the features
         // first segment them according to the tags, and then read them out in the second pass.
         let key_id;
+        let name_key_id;
         let highway_value_id;
         let major_value_id;
         let medium_value_id;
@@ -720,11 +792,12 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         {
             let (key_ids, value_ids) = scan_for_keys_and_values(
                 &mut reader.clone(),
-                &vec!["pmap:kind"],
+                &vec!["pmap:kind", "name"],
                 &vec!["highway", "major_road", "medium_road", "minor_road"],
             )?;
 
             key_id = key_ids[0];
+            name_key_id = key_ids[1];
 
             highway_value_id = value_ids[0];
             major_value_id = value_ids[1];
@@ -740,6 +813,9 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         let mut minor_features = vec![];
         let mut other_features = vec![];
 
+        let mut name_reader = reader.clone();
+        let mut name_index = Vec::new();
+
         {
             while let Ok(field) = reader.next() {
                 match field {
@@ -748,6 +824,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                         reader.enter_message()?;
                         let feature_ptr = reader.clone();
                         let mut bucket = &mut other_features;
+                        let mut name_value = None;
                         while let Ok(field) = reader.next() {
                             match field {
                                 pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
@@ -770,6 +847,8 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                             } else if Some(value) == minor_value_id {
                                                 bucket = &mut minor_features;
                                             }
+                                        } else if Some(key) == name_key_id {
+                                            name_value = Some(value);
                                         }
                                     }
                                 },
@@ -777,18 +856,24 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                 x => { reader.skip(x.wtype)?; },
                             }
                         }
-                        bucket.push(feature_ptr);
+                        bucket.push((feature_ptr, name_index.len()));
+                        name_index.push(name_value);
                     }
                     x => { reader.skip(x.wtype)?; },
                 }
             }
         }
 
-        fn read_geometry(features: Vec<pbuf::Message>) -> pbuf::Result<LineGeom> {
+        let mut index : Vec<usize> = (0..name_index.len()).collect();
+        index.sort_by_key(|x| name_index[*x]);
+        let names = lookup_values(&mut name_reader, &name_index, &index).unwrap();
+
+        fn read_geometry(features: Vec<(pbuf::Message, usize)>, names: &Vec<Option<String>>) -> pbuf::Result<LineGeom> {
             let mut start = vec![];
             let mut vert = pmtile::Line::new();
+            let mut name = Vec::new();
 
-            for mut reader in features {
+            for (mut reader, namei) in features {
                 while let Ok(field) = reader.next() {
                     match field {
                         pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
@@ -804,6 +889,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                     cy += y as f32;
 
                                     start.push(LineStart{pos: vert.verts.len()});
+                                    name.push(names[namei].clone());
                                     // Don't push any verts until the line is drawn
                                 } else if (cmd & 7) == 2 { // LineTo
                                     for i in 0..(cmd >> 3) {
@@ -827,78 +913,18 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                     }
                 }
             }
-            return Ok(LineGeom { start, data: vert.verts });
+            return Ok(LineGeom { start, name, data: vert.verts });
         }
 
         return Ok((
-            read_geometry(other_features)?,
-            read_geometry(highway_features)?,
-            read_geometry(major_features)?,
-            read_geometry(medium_features)?,
-            read_geometry(minor_features)?,
+            read_geometry(other_features, &names)?,
+            read_geometry(highway_features, &names)?,
+            read_geometry(major_features, &names)?,
+            read_geometry(medium_features, &names)?,
+            read_geometry(minor_features, &names)?,
         ));
     }
 
-
-    fn read_line_layer(mut reader: pbuf::Message) -> pbuf::Result<LineGeom> {
-        let mut start = vec![];
-        let mut vert = pmtile::Line::new();
-
-        while let Ok(field) = reader.next() {
-            match field {
-                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
-                    reader.enter_message()?;
-                    while let Ok(field) = reader.next() {
-                        match field {
-                            pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
-                                let geo_type = reader.read_var_int()?;
-                                assert!(geo_type == 2);
-                            },
-                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
-                                let mut cx = 0.0;
-                                let mut cy = 0.0;
-                                let mut it = reader.read_packed_var_int()?;
-                                while let Some(cmd) = it.next() {
-                                    let cmd = cmd?;
-                                    if (cmd & 7) == 1 { // MoveTo
-                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                        cx += x as f32;
-                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap());
-                                        cy += y as f32;
-
-                                        start.push(LineStart{pos: vert.verts.len()});
-                                        // Don't push any verts until the line is drawn
-                                    } else if (cmd & 7) == 2 { // LineTo
-                                        for i in 0..(cmd >> 3) {
-                                            let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                            let px = cx + x;
-                                            let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                            let py = cy + y;
-
-                                            vert.add_point(crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
-
-                                            cx = px;
-                                            cy = py;
-                                        }
-                                    } else {
-                                        panic!("Unknown command");
-                                    }
-                                }
-                            }
-                            pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
-                            x => { reader.skip(x.wtype)?; },
-                        }
-                    }
-                }
-                x => { reader.skip(x.wtype)?; },
-            }
-        }
-        return Ok(LineGeom{
-            start,
-            data: vert.verts,
-        });
-    }
 
     fn read_landuse_layer(reader: &mut pbuf::Message) -> pbuf::Result<(PolyGeom, PolyGeom, PolyGeom)> {
         let filter = Filter::scan(
@@ -1062,11 +1088,11 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         read_road_layer(layer)?
     } else {
         (
-            LineGeom { start: vec![], data: vec![] },
-            LineGeom { start: vec![], data: vec![] },
-            LineGeom { start: vec![], data: vec![] },
-            LineGeom { start: vec![], data: vec![] },
-            LineGeom { start: vec![], data: vec![] },
+            LineGeom { start: vec![], name: vec![], data: vec![] },
+            LineGeom { start: vec![], name: vec![], data: vec![] },
+            LineGeom { start: vec![], name: vec![], data: vec![] },
+            LineGeom { start: vec![], name: vec![], data: vec![] },
+            LineGeom { start: vec![], name: vec![], data: vec![] },
         )
     };
 
@@ -1638,8 +1664,10 @@ pub mod pmtile {
                     orientation += std::f64::consts::TAU/2.0;
                 }
 
+                let text = raw_tile.name[i].clone().unwrap_or("<Unnamed>".to_owned());
+
                 labels.push(Label{
-                    text: "Hello sailog!".to_owned(),
+                    text,
                     pos: mid,
                     orientation,
                 });

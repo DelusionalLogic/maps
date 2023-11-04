@@ -154,6 +154,10 @@ impl Vector2<f32> {
         self.x = self.x.max(other.x);
         self.y = self.y.max(other.y);
     }
+
+    pub fn angle(&mut self) -> f32 {
+        return f32::atan2(self.y, self.x);
+    }
 }
 
 impl Vector2<f64> {
