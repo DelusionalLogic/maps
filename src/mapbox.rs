@@ -513,8 +513,19 @@ pub struct LineStart {
 
 pub struct LineGeom {
     start: Vec<LineStart>,
-    name: Vec<Option<String>>,
+    name: Vec<Option<usize>>,
     data: Vec<LineVert>,
+}
+
+impl LineGeom {
+    pub fn new() -> Self {
+        return LineGeom {
+
+            start: Vec::new(),
+            name: Vec::new(),
+            data: Vec::new(),
+        };
+    }
 }
 
 #[derive(Clone)]
@@ -535,6 +546,8 @@ pub struct RawTile {
     pub major: LineGeom,
     pub medium: LineGeom,
     pub minor: LineGeom,
+
+    pub strings: Vec<String>,
 }
 
 pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
@@ -657,26 +670,19 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     }
 
-    fn lookup_values(reader: &mut pbuf::Message, values: &Vec<Option<u64>>, order: &Vec<usize>) -> pbuf::Result<Vec<Option<String>>> {
+    fn lookup_values(reader: &mut pbuf::Message, values: &Vec<u64>, order: &Vec<usize>) -> pbuf::Result<(Vec<usize>, Vec<String>)> {
         let mut oit = order.iter().peekable();
 
+        let mut index = Vec::with_capacity(values.len());
         let mut value_ids = Vec::with_capacity(values.len());
         for _ in 0..values.len() {
-            value_ids.push(None);
-        }
-
-        while let Some(i) = oit.peek() {
-            if values[**i].is_some() {
-                break;
-            }
-
-            oit.next();
+            index.push(0);
         }
 
         let mut cursor = 0;
         while let Some(i) = oit.next() {
             // We skipped all the Nones
-            let value = values[*i].unwrap();
+            let value = values[*i];
 
             while cursor < value {
                 let field = reader.next()?;
@@ -697,7 +703,8 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                         reader.enter_message()?;
                         match reader.next().unwrap() {
                             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 1} => {
-                                value_ids[*i] = Some(reader.read_string()?);
+                                index[*i] = value_ids.len();
+                                value_ids.push(reader.read_string()?);
                             }
                             _ => { panic!("Incorrect name value type"); },
                         }
@@ -710,11 +717,11 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
             }
             cursor += 1;
 
+            // Remap anything pointing to the same index
             while let Some(i2) = oit.peek() {
-                // We skipped all the Nones
-                let n_value = values[**i2].unwrap();
+                let n_value = values[**i2];
                 if n_value == value {
-                    value_ids[**i2] = value_ids[*i].clone();
+                    index[**i2] = index[*i];
                     oit.next();
                 } else {
                     break;
@@ -722,7 +729,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
             }
         }
 
-        return Ok(value_ids);
+        return Ok((index, value_ids));
     }
 
     fn scan_for_keys_and_values(reader: &mut pbuf::Message, keys: &Vec<&str>, values: &Vec<&str>) -> pbuf::Result<(Vec<Option<u64>>, Vec<Option<u64>>)> {
@@ -777,7 +784,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         return Ok((key_ids, value_ids));
     }
 
-    fn read_road_layer(reader: &mut pbuf::Message) -> pbuf::Result<(LineGeom, LineGeom, LineGeom, LineGeom, LineGeom)> {
+    fn read_road_layer(reader: &mut pbuf::Message, tile: &mut RawTile) -> pbuf::Result<()> {
         // Since the ordering of the fields in the "messages" aren't well defined this end up being
         // way more difficult than it really should be. First we find the key and value indexes of
         // the keys/values we care about, then we have to do a double pass on all the features
@@ -856,8 +863,13 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                 x => { reader.skip(x.wtype)?; },
                             }
                         }
-                        bucket.push((feature_ptr, name_index.len()));
-                        name_index.push(name_value);
+                        let slot = if name_value.is_some() {
+                            name_index.push(name_value.unwrap());
+                            Some(name_index.len()-1)
+                        } else {
+                            None
+                        };
+                        bucket.push((feature_ptr, slot));
                     }
                     x => { reader.skip(x.wtype)?; },
                 }
@@ -866,12 +878,13 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
         let mut index : Vec<usize> = (0..name_index.len()).collect();
         index.sort_by_key(|x| name_index[*x]);
-        let names = lookup_values(&mut name_reader, &name_index, &index).unwrap();
+        let (index, mut names) = lookup_values(&mut name_reader, &name_index, &index).unwrap();
+        let offset = tile.strings.len();
 
-        fn read_geometry(features: Vec<(pbuf::Message, usize)>, names: &Vec<Option<String>>) -> pbuf::Result<LineGeom> {
-            let mut start = vec![];
-            let mut vert = pmtile::Line::new();
-            let mut name = Vec::new();
+        tile.strings.append(&mut names);
+
+        fn read_geometry(features: Vec<(pbuf::Message, Option<usize>)>, name_index: &Vec<usize>, offset: usize, geom: &mut LineGeom) -> pbuf::Result<()> {
+            let mut vert = pmtile::Line::new_under(&mut geom.data);
 
             for (mut reader, namei) in features {
                 while let Ok(field) = reader.next() {
@@ -888,8 +901,9 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                     let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                     cy += y as f32;
 
-                                    start.push(LineStart{pos: vert.verts.len()});
-                                    name.push(names[namei].clone());
+                                    geom.start.push(LineStart{pos: vert.verts.len()});
+                                    // @Speed: Maybe we can avoid this memcpy somehow.
+                                    geom.name.push(namei.map(|x| offset + name_index[x]));
                                     // Don't push any verts until the line is drawn
                                 } else if (cmd & 7) == 2 { // LineTo
                                     for i in 0..(cmd >> 3) {
@@ -913,16 +927,16 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                     }
                 }
             }
-            return Ok(LineGeom { start, name, data: vert.verts });
+            return Ok(());
         }
 
-        return Ok((
-            read_geometry(other_features, &names)?,
-            read_geometry(highway_features, &names)?,
-            read_geometry(major_features, &names)?,
-            read_geometry(medium_features, &names)?,
-            read_geometry(minor_features, &names)?,
-        ));
+        read_geometry(other_features, &index, offset, &mut tile.roads)?;
+        read_geometry(highway_features, &index, offset, &mut tile.highways)?;
+        read_geometry(major_features, &index, offset, &mut tile.major)?;
+        read_geometry(medium_features, &index, offset, &mut tile.medium)?;
+        read_geometry(minor_features, &index, offset, &mut tile.minor)?;
+
+        return Ok(());
     }
 
 
@@ -1084,18 +1098,6 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
     let mut layer_messages = scan_for_layers(reader, layer_names)?;
 
-    let (roads, highways, major, medium, minor) = if let Some(layer) = &mut layer_messages[0] {
-        read_road_layer(layer)?
-    } else {
-        (
-            LineGeom { start: vec![], name: vec![], data: vec![] },
-            LineGeom { start: vec![], name: vec![], data: vec![] },
-            LineGeom { start: vec![], name: vec![], data: vec![] },
-            LineGeom { start: vec![], name: vec![], data: vec![] },
-            LineGeom { start: vec![], name: vec![], data: vec![] },
-        )
-    };
-
     let earth = if let Some(layer) = &mut layer_messages[1] {
         read_poly_layer(layer)?
     } else {
@@ -1133,7 +1135,25 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         )
     };
 
-    return Ok(RawTile { roads, highways, major, medium, minor, earth, buildings, water, farmland, areas });
+    let mut tile = RawTile { roads: LineGeom::new(),
+        highways: LineGeom::new(),
+        major: LineGeom::new(),
+        medium: LineGeom::new(),
+        minor: LineGeom::new(),
+        earth,
+        buildings,
+        water,
+        farmland,
+        areas,
+
+        strings: Vec::new(),
+    };
+
+    if let Some(layer) = &mut layer_messages[0] {
+        read_road_layer(layer, &mut tile)?
+    };
+
+    return Ok(tile);
 }
 
 pub mod pmtile {
@@ -1395,14 +1415,45 @@ pub mod pmtile {
         }
     }
 
-    pub struct Line {
-        pub verts: Vec<super::LineVert>,
+    pub enum Ownership<'a, T> {
+        Owned(T),
+        Unowned(&'a mut T),
     }
 
-    impl Line {
+    impl <'a, T> std::ops::Deref for Ownership<'a, T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            return match self {
+                Ownership::Owned(x) => x,
+                Ownership::Unowned(x) => x,
+            }
+        }
+    }
+
+    impl <'a, T> std::ops::DerefMut for Ownership<'a, T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            return match self {
+                Ownership::Owned(x) => x,
+                Ownership::Unowned(x) => x,
+            }
+        }
+    }
+
+    pub struct Line<'a> {
+        pub verts: Ownership<'a, Vec<super::LineVert>>,
+    }
+
+    impl <'a> Line<'a> {
         pub fn new() -> Self {
             return Line{
-                verts: Vec::new(),
+                verts: Ownership::Owned(Vec::new()),
+            };
+        }
+
+        pub fn new_under(under: &'a mut Vec<super::LineVert>) -> Self {
+            return Line{
+                verts: Ownership::Unowned(under),
             };
         }
 
@@ -1594,7 +1645,7 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, z: u8) -> R::Layer {
+        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
             let mut labels = Vec::new();
             // Generate labels
             for i in 0..raw_tile.start.len() {
@@ -1664,13 +1715,15 @@ pub mod pmtile {
                     orientation += std::f64::consts::TAU/2.0;
                 }
 
-                let text = raw_tile.name[i].clone().unwrap_or("<Unnamed>".to_owned());
+                let text = raw_tile.name[i];
 
-                labels.push(Label{
-                    text,
-                    pos: mid,
-                    orientation,
-                });
+                if let Some(text) = text {
+                    labels.push(Label{
+                        text: strings[text].clone(),
+                        pos: mid,
+                        orientation,
+                    });
+                }
             }
 
             // dbg!(&raw_tile.data);
@@ -1679,11 +1732,11 @@ pub mod pmtile {
 
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads, z)),
-            highways: Some(compile_line_layer::<R>(&raw_tile.highways, z)),
-            major: Some(compile_line_layer::<R>(&raw_tile.major, z)),
-            medium: Some(compile_line_layer::<R>(&raw_tile.medium, z)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor, z)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, z)),
+            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, z)),
+            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, z)),
+            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, z)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, z)),
             buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
             water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
