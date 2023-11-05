@@ -211,11 +211,12 @@ fn load_font() -> FontMap {
         }
     }
 
-    face.set_pixel_sizes(0, 16).unwrap();
+    face.set_pixel_sizes(0, 32).unwrap();
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
     for i in 0..128 {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
         let glyph = face.glyph();
+        glyph.render_glyph(freetype::render_mode::RenderMode::Sdf).unwrap();
         let bitmap = glyph.bitmap();
         let size = Vector2::new(bitmap.width() as f32, bitmap.rows() as f32);
         let bearing = Vector2::new(
@@ -258,8 +259,6 @@ fn load_font() -> FontMap {
 
         void main() {
             uv = position;
-            uv.y = uv.y;
-
             gl_Position = transform * vec4(position, 0.0, 1.0);
         }
     ";
@@ -271,9 +270,12 @@ fn load_font() -> FontMap {
 
         out vec4 color;
 
+        const float smoothing = 1.0/16.0;
+
         void main() {
-            vec4 tex = texture(tex, uv);
-            color = vec4(tex.r);
+            float dist = texture2D(tex, uv).r;
+            float alpha = smoothstep(0.5 - smoothing, 0.5 + smoothing, dist);
+            color = vec4(alpha*1.0, alpha*1.0, alpha*1.0, alpha);
         }
     ";
 
@@ -777,110 +779,92 @@ fn main() {
                 }
             }
 
-            let mut labels = Vec::new();
-            let mut bbox = Vec::new();
-            let mut size = Vec::new();
+            {
+                let road_layers = [
+                    (&tile.layers.roads, 60.0),
+                    (&tile.layers.minor, 60.0),
+                    (&tile.layers.medium, 60.0),
+                    (&tile.layers.major, 60.0),
+                    (&tile.layers.highways, 300.0),
+                ];
 
-            if let Some(roads) = &tile.layers.highways {
-                for label in &roads.labels {
-                    let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
+                let mut labels = Vec::new();
+                let mut bbox = Vec::new();
+                let mut size = Vec::new();
 
-                    // Transform to fit the destination size
-                    // @SPEED This is fixed per tile. We could precompute it
-                    min.mulf(300.0);
-                    min.divf(grid_step as f32*tile.extent as f32);
-                    max.mulf(300.0);
-                    max.divf(grid_step as f32*tile.extent as f32);
+                for (roads, lsize) in road_layers {
+                    if let Some(roads) = roads {
+                        for label in &roads.labels {
+                            let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
 
-                    // @HACK we place it in the middle of the baseline, but the middle of the
-                    // baselines is defined as the centerpoint between the start pen location and
-                    // the right side of the bounding box (which is not necessarily the ending pen
-                    // location). It might look better to use the middle of the bounding box in the
-                    // x direction.
-                    bbox.push((min, max));
-                    labels.push(label);
-                    size.push(300.0);
+                            // Transform to fit the destination size
+                            // @SPEED This is fixed per tile. We could precompute it
+                            min.mulf(lsize);
+                            min.divf(grid_step as f32*tile.extent as f32);
+                            max.mulf(lsize);
+                            max.divf(grid_step as f32*tile.extent as f32);
+
+                            // @HACK we place it in the middle of the baseline, but the middle of the
+                            // baselines is defined as the centerpoint between the start pen location and
+                            // the right side of the bounding box (which is not necessarily the ending pen
+                            // location). It might look better to use the middle of the bounding box in the
+                            // x direction.
+                            bbox.push((min, max));
+                            labels.push(label);
+                            size.push(lsize as f64);
+                        }
+                    }
                 }
-            }
-
-            if let Some(roads) = &tile.layers.roads {
-                for label in &roads.labels {
-                    let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
-
-                    // Transform to fit the destination size
-                    // @SPEED This is fixed per tile. We could precompute it
-                    min.mulf(60.0);
-                    min.divf(grid_step as f32*tile.extent as f32);
-                    max.mulf(60.0);
-                    max.divf(grid_step as f32*tile.extent as f32);
-
-                    // @HACK we place it in the middle of the baseline, but the middle of the
-                    // baselines is defined as the centerpoint between the start pen location and
-                    // the right side of the bounding box (which is not necessarily the ending pen
-                    // location). It might look better to use the middle of the bounding box in the
-                    // x direction.
-                    bbox.push((min, max));
-                    labels.push(label);
-                    size.push(60.0);
-                }
-            }
 
 
-            let mut boxes = Vec::with_capacity(labels.len());
-            // Calculate the axis aligned bouding box of each label
-            for (i, label) in labels.iter().enumerate() {
-                let (min, max) = bbox[i];
+                let mut boxes = Vec::with_capacity(labels.len());
+                // Calculate the axis aligned bouding box of each label
+                for (i, label) in labels.iter().enumerate() {
+                    let (min, max) = bbox[i];
 
-                let mut max = max.clone();
-                max.subv2(&min);
-
-                let mut size = Vector2::new(
-                    max.x as f64 * label.orientation.cos().abs() + max.y as f64 * label.orientation.sin().abs(),
-                    max.x as f64 * label.orientation.sin().abs() + max.y as f64 * label.orientation.cos().abs(),
-                );
-                size.divf(2.0);
-
-                let mut min = label.pos.clone();
-                min.subv2(&size);
-                let mut max = label.pos.clone();
-                max.addv2(&size);
-
-                boxes.push(label::Box {
-                    min, max
-                });
-            }
-
-            // And select a set that doesn't overlap
-            let to_draw = label::select_nooverlap(&boxes);
-
-            for i in to_draw {
-                let label = labels[i];
-                let size = size[i];
-                let (min, max) = bbox[i];
-
-                // Remove labels that overlap a tile boundary
-                {
                     let mut max = max.clone();
                     max.subv2(&min);
 
-                    let awidth = max.x as f64 * label.orientation.cos().abs() + max.y as f64 * label.orientation.sin().abs();
-                    let aheight = max.x as f64 * label.orientation.sin().abs() + max.y as f64 * label.orientation.cos().abs();
+                    let mut size = Vector2::new(
+                        max.x as f64 * label.orientation.cos().abs() + max.y as f64 * label.orientation.sin().abs(),
+                        max.x as f64 * label.orientation.sin().abs() + max.y as f64 * label.orientation.cos().abs(),
+                    );
+                    size.divf(2.0);
 
-                    if label.pos.x < awidth/2.0 || label.pos.x > 4096.0-awidth/2.0 {
-                        continue;
-                    }
-                    if label.pos.y < aheight/2.0 || label.pos.y > 4096.0-aheight/2.0 {
-                        continue;
-                    }
+                    let mut min = label.pos.clone();
+                    min.subv2(&size);
+                    let mut max = label.pos.clone();
+                    max.addv2(&size);
+
+                    boxes.push(label::Box {
+                        min, max
+                    });
                 }
 
-                {
-                    let mut text_transform = tile_trans.clone();
-                    text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));
-                    text_transform.rotate(label.orientation);
-                    text_transform.translate(&Vector2::new(-max.x / 2.0, -min.y / 2.0));
-                    text_transform.scale(&Vector2::new(size/grid_step/tile.extent as f64, size/grid_step/tile.extent as f64));
-                    draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
+                // And select a set that doesn't overlap
+                let mut to_draw = label::select_nooverlap(&boxes);
+
+                // Remove labels that overlap a tile boundary
+                to_draw.retain(|i| {
+                    let bbox = &boxes[*i];
+
+                    bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
+                        && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
+                });
+
+                for i in to_draw {
+                    let label = labels[i];
+                    let size = size[i];
+                    let (_, max) = bbox[i];
+
+                    {
+                        let mut text_transform = tile_trans.clone();
+                        text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));
+                        text_transform.rotate(label.orientation);
+                        text_transform.translate(&Vector2::new(-max.x / 2.0, max.y / 2.0));
+                        text_transform.scale(&Vector2::new(size/grid_step/tile.extent as f64, size/grid_step/tile.extent as f64));
+                        draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
+                    }
                 }
             }
 
