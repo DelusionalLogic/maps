@@ -762,7 +762,7 @@ fn main() {
 
             {
                 let road_layers = [
-                    (&tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00003),
+                    (&tile.layers.roads, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00001),
                     (&tile.layers.minor, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004),
                     (&tile.layers.medium, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007),
                     (&tile.layers.major, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009),
@@ -841,8 +841,7 @@ fn main() {
                     });
                 }
 
-                // And select a set that doesn't overlap
-                let mut to_draw = label::select_nooverlap(&boxes);
+                let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
 
                 // Remove labels that overlap a tile boundary
                 to_draw.retain(|i| {
@@ -851,6 +850,11 @@ fn main() {
                     bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
                         && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
                 });
+
+                to_draw.sort_by_key(|i| labels[*i].rank);
+
+                // And select a set that doesn't overlap
+                label::select_nooverlap(&boxes, &mut to_draw);
 
                 for i in to_draw {
                     let label = labels[i];

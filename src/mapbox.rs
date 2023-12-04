@@ -1354,6 +1354,7 @@ pub mod pmtile {
     }
 
     pub struct Label {
+        pub rank: u8,
         pub text: String,
         pub pos: Vector2<f64>,
         pub orientation: f64,
@@ -1671,19 +1672,20 @@ pub mod pmtile {
                         y: p2.y as f64,
                     };
                     v2.subv2(&v1);
-                    len += v2.len_squared();
+                    len += v2.len();
                 }
 
                 len /= 2.0;
 
-                let mut mid = Vector2::new(0.0, 0.0);
-                let mut orientation = 0.0;
-                // Walk the line until we reach the midpoint. Then place the label
+                let distance_between_labels = 400.0;
+                let mut next = len % distance_between_labels;
+
+                // Walk the line, placing labels as we go
                 for j in 0..(end-start)/6 {
                     let p1 = raw_tile.data[start + j*6];
                     let p2 = raw_tile.data[start + j*6 + 2];
 
-                    mid = Vector2 {
+                    let v1 = Vector2 {
                         x: p1.x as f64,
                         y: p1.y as f64,
                     };
@@ -1691,38 +1693,44 @@ pub mod pmtile {
                         x: p2.x as f64,
                         y: p2.y as f64,
                     };
-                    v2.subv2(&mid);
-                    orientation = v2.angle();
-                    let segment_len = v2.len_squared();
-                    if len > segment_len {
-                        // The placement isn't on this segment
-                        len -= segment_len;
-                        continue;
+                    v2.subv2(&v1);
+
+                    let segment_len = v2.len();
+                    v2.divf(segment_len);
+
+                    let mut orientation = v2.angle();
+                    // Rotate the labels if they would be upside down
+                    if orientation > std::f64::consts::TAU/4.0 {
+                        orientation -= std::f64::consts::TAU/2.0;
+                    } else if orientation < -std::f64::consts::TAU/4.0 {
+                        orientation += std::f64::consts::TAU/2.0;
                     }
 
-                    let ratio = len / segment_len;
+                    let text = raw_tile.name[i];
 
-                    v2.mulf(ratio);
+                    let mut x = 0;
+                    while next <= segment_len {
+                        assert!(next >= 0.0);
 
-                    mid.addv2(&v2);
-                    break;
-                }
+                        let mut pos = v2.clone();
+                        pos.mulf(next);
+                        pos.addv2(&v1);
 
-                // Rotate the labels if they would be upside down
-                if orientation > std::f64::consts::TAU/4.0 {
-                    orientation -= std::f64::consts::TAU/2.0;
-                } else if orientation < -std::f64::consts::TAU/4.0 {
-                    orientation += std::f64::consts::TAU/2.0;
-                }
+                        if let Some(text) = text {
+                            labels.push(Label{
+                                rank: 1,
+                                text: strings[text].clone(),
+                                // text: format!("{j} {x}"),
+                                pos,
+                                orientation,
+                            });
+                        }
 
-                let text = raw_tile.name[i];
+                        x+= 1;
+                        next += distance_between_labels;
+                    }
 
-                if let Some(text) = text {
-                    labels.push(Label{
-                        text: strings[text].clone(),
-                        pos: mid,
-                        orientation,
-                    });
+                    next -= segment_len;
                 }
             }
 

@@ -12,6 +12,14 @@ impl Sqrt for f32 {
     }
 }
 
+impl Sqrt for f64 {
+    type Output = f64;
+
+    fn sqrt(self) -> Self::Output {
+        return self.sqrt();
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Vector2<T> {
     pub x: T,
