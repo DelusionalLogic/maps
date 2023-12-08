@@ -195,7 +195,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
+    let face = freetype.new_face("/System/Library/Fonts/Optima.ttc", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -273,7 +273,7 @@ fn load_font() -> FontMap {
         const float smoothing = 1.0/16.0;
 
         void main() {
-            float dist = texture2D(tex, uv).r;
+            float dist = texture(tex, uv).r;
             float alpha = smoothstep(0.5 - smoothing, 0.5 + smoothing, dist);
             color = vec4(alpha*1.0, alpha*1.0, alpha*1.0, alpha);
         }
@@ -325,6 +325,9 @@ fn load_font() -> FontMap {
     };
 }
 
+// @CLEANUP @UX: This calculation is a little strange. I'm pretty sure the SDF rendering is messing
+// with the bitmap size, causing us to resolve a bounding box that's too large for the label. It's
+// good enough for now, but looks bad.
 fn size_ascii(font: &FontMap, text: &[u8]) -> (Vector2<f32>, Vector2<f32>) {
     let mut advance = 0.0;
     let mut max = Vector2::new(0.0, 0.0);
@@ -781,8 +784,8 @@ fn main() {
 
             {
                 let road_layers = [
-                    (&tile.layers.roads, 1.0),
-                    (&tile.layers.minor, 1.0),
+                    (&tile.layers.roads, 0.5),
+                    (&tile.layers.minor, 0.5),
                     (&tile.layers.medium, 1.0),
                     (&tile.layers.major, 1.0),
                     (&tile.layers.highways, 2.0),
@@ -797,12 +800,17 @@ fn main() {
                         for label in &roads.labels {
                             let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
 
-                            // Transform into tile scale
-                            // @SPEED This is fixed per tile. We could precompute it
-                            min.mulf(lsize);
-                            // min.divf(tile.extent as f32);
-                            max.mulf(lsize);
-                            // max.divf(tile.extent as f32);
+                            let mut transform = Transform::identity();
+                            let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32;
+                            transform.translate(&Vector2::new(max.x / 2.0 * scale_factor * lsize, -min.y * scale_factor * lsize));
+                            transform.scale(&Vector2::new(scale_factor, scale_factor));
+                            transform.scale(&Vector2::new(lsize, lsize));
+                            transform.translate(&Vector2::new(-max.x / 2.0, min.y));
+
+                            let mat3 : &Mat3 = &transform.mat().into();
+                            min.apply_transform(&mat3.into());
+                            max.apply_transform(&mat3.into());
+
 
                             // @HACK we place it in the middle of the baseline, but the middle of the
                             // baselines is defined as the centerpoint between the start pen location and
@@ -819,6 +827,10 @@ fn main() {
 
                 let mut boxes = Vec::with_capacity(labels.len());
                 // Calculate the axis aligned bouding box of each label
+                // @HACK: This is slightly misaligned since the box we are calculating the bound
+                // box for isn't centered at the same point as the bounding box, and correcting for
+                // that requires some global positioning I don't care about for now. It's going
+                // to be ever so slightly wrong.
                 for (i, label) in labels.iter().enumerate() {
                     let (min, max) = bbox[i];
 
@@ -841,51 +853,97 @@ fn main() {
                     });
                 }
 
-                for (i, label) in labels.iter().enumerate() {
-                    let (min, max) = bbox[i];
+                // For debugging label culling
+                if false {
+                    for (i, label) in labels.iter().enumerate() {
+                        let (min, max) = bbox[i];
 
-                    let mut trans = tile_trans.clone();
-                    let mut proj = projection.clone();
-                    proj.rotate(label.orientation);
+                        let mut trans = tile_trans.clone();
+                        let mut proj = projection.clone();
+                        proj.rotate(label.orientation);
 
-                    let mut size = max.clone();
-                    size.subv2(&min);
+                        let mut size = max.clone();
+                        size.subv2(&min);
 
-                    trans.translate(&label.pos);
-                    trans.rotate(label.orientation);
-                    trans.translate(&Vector2::new(-max.x / 2.0, min.y));
-                    trans.scale(&Vector2::new(size.x/border.extent as f32, size.y/border.extent as f32));
+                        trans.translate(&label.pos);
+                        trans.rotate(label.orientation);
+                        trans.translate(&Vector2::new(-max.x / 2.0, min.y));
+                        trans.scale(&Vector2::new(size.x/border.extent as f32, size.y/border.extent as f32));
 
-                    let gl_trans = trans.to_gl();
-                    let gl_proj = proj.to_gl();
-                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(1.0, 1.0, 1.0, 1.0), 1.0);
+                        let gl_trans = trans.to_gl();
+                        let gl_proj = proj.to_gl();
+                        render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(1.0, 1.0, 1.0, 1.0), 1.0);
+                    }
+
+                    for (i, _label) in labels.iter().enumerate() {
+                        let bbox = &boxes[i];
+
+                        let mut trans = tile_trans.clone();
+                        let mut size = bbox.max.clone();
+                        size.subv2(&bbox.min);
+
+                        trans.translate(&bbox.min);
+
+                        // @HACK This is just because the border layer is a hack as well.
+                        trans.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
+
+                        let gl_trans = trans.to_gl();
+                        let gl_proj = projection.to_gl();
+                        render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(0.0, 1.0, 1.0, 1.0), 1.0);
+                    }
                 }
 
                 let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
 
                 // Remove labels that overlap a tile boundary
-                // to_draw.retain(|i| {
-                //     let bbox = &boxes[*i];
+                to_draw.retain(|i| {
+                    let bbox = &boxes[*i];
 
-                //     bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
-                //         && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
-                // });
+                    bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
+                        && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
+                });
+
+                // Discard labels that are too small
+                to_draw.retain(|i| {
+                    let (min, max) = &bbox[*i];
+
+                    let mut min = min.clone();
+                    let mut max = max.clone();
+
+                    // This transforms the coordinates all the way to opengl device coordinates.
+                    // Keep in mind that this flips the y axis.
+                    // @CLEANUP: We should probably just go to screenspace instead. This seems
+                    // excessive.
+                    let mat3: &Mat3 = &tile_trans.mat().into();
+                    min.apply_transform(&mat3.into());
+                    max.apply_transform(&mat3.into());
+
+                    let mut size = max.clone();
+                    size.subv2(&min);
+
+                    // Define too small as .1 percent of the window
+                    size.x * -size.y > 0.001
+                });
 
                 to_draw.sort_by_key(|i| labels[*i].rank);
 
                 // And select a set that doesn't overlap
-                // label::select_nooverlap(&boxes, &mut to_draw);
+                label::select_nooverlap(&boxes, &mut to_draw);
 
                 for i in to_draw {
                     let label = labels[i];
                     let size = size[i];
-                    let (_, max) = bbox[i];
+                    let (min, max) = bbox[i];
+
+                    let mut extent = max.clone();
+                    extent.subv2(&min);
 
                     {
                         let mut text_transform = tile_trans.clone();
                         text_transform.translate(&label.pos);
                         text_transform.rotate(label.orientation);
-                        text_transform.translate(&Vector2::new(-max.x / 2.0, max.y / 2.0));
+                        text_transform.translate(&Vector2::new(-max.x / 2.0, -extent.y/2.0-min.y));
+                        text_transform.scale(&Vector2::new(2.0_f64.powi(tile.z as i32 - 15), 2.0_f64.powi(tile.z as i32 - 15)));
                         text_transform.scale(&Vector2::new(size, size));
                         draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
                     }

@@ -199,6 +199,12 @@ pub struct Mat3 {
     pub data: [f64; 9],
 }
 
+pub const MAT3_IDENTITY: Mat3 = Mat3{ data: [
+           1.0,    0.0,    0.0,
+           0.0,    1.0,    0.0,
+           0.0,    0.0,    1.0,
+]};
+
 impl Mat4 {
     pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Self {
         return Mat4{
@@ -299,6 +305,16 @@ impl Into<[f32; 16]> for &Mat4 {
 }
 
 impl Into<[f32; 9]> for Mat3 {
+    fn into(self) -> [f32; 9] {
+        return [
+            self.data[0] as f32, self.data[1] as f32, self.data[2] as f32,
+            self.data[3] as f32, self.data[4] as f32, self.data[5] as f32,
+            self.data[6] as f32, self.data[7] as f32, self.data[8] as f32,
+        ];
+    }
+}
+
+impl Into<[f32; 9]> for &Mat3 {
     fn into(self) -> [f32; 9] {
         return [
             self.data[0] as f32, self.data[1] as f32, self.data[2] as f32,

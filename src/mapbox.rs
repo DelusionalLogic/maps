@@ -1708,7 +1708,6 @@ pub mod pmtile {
 
                     let text = raw_tile.name[i];
 
-                    let mut x = 0;
                     while next <= segment_len {
                         assert!(next >= 0.0);
 
@@ -1720,13 +1719,12 @@ pub mod pmtile {
                             labels.push(Label{
                                 rank: 1,
                                 text: strings[text].clone(),
-                                // text: format!("{j} {x}"),
+                                // text: format!("A"),
                                 pos,
                                 orientation,
                             });
                         }
 
-                        x+= 1;
                         next += distance_between_labels;
                     }
 
