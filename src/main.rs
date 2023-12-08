@@ -781,11 +781,11 @@ fn main() {
 
             {
                 let road_layers = [
-                    (&tile.layers.roads, 60.0),
-                    (&tile.layers.minor, 60.0),
-                    (&tile.layers.medium, 60.0),
-                    (&tile.layers.major, 60.0),
-                    (&tile.layers.highways, 300.0),
+                    (&tile.layers.roads, 1.0),
+                    (&tile.layers.minor, 1.0),
+                    (&tile.layers.medium, 1.0),
+                    (&tile.layers.major, 1.0),
+                    (&tile.layers.highways, 2.0),
                 ];
 
                 let mut labels = Vec::new();
@@ -797,12 +797,12 @@ fn main() {
                         for label in &roads.labels {
                             let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
 
-                            // Transform to fit the destination size
+                            // Transform into tile scale
                             // @SPEED This is fixed per tile. We could precompute it
                             min.mulf(lsize);
-                            min.divf(grid_step as f32*tile.extent as f32);
+                            // min.divf(tile.extent as f32);
                             max.mulf(lsize);
-                            max.divf(grid_step as f32*tile.extent as f32);
+                            // max.divf(tile.extent as f32);
 
                             // @HACK we place it in the middle of the baseline, but the middle of the
                             // baselines is defined as the centerpoint between the start pen location and
@@ -841,20 +841,40 @@ fn main() {
                     });
                 }
 
+                for (i, label) in labels.iter().enumerate() {
+                    let (min, max) = bbox[i];
+
+                    let mut trans = tile_trans.clone();
+                    let mut proj = projection.clone();
+                    proj.rotate(label.orientation);
+
+                    let mut size = max.clone();
+                    size.subv2(&min);
+
+                    trans.translate(&label.pos);
+                    trans.rotate(label.orientation);
+                    trans.translate(&Vector2::new(-max.x / 2.0, min.y));
+                    trans.scale(&Vector2::new(size.x/border.extent as f32, size.y/border.extent as f32));
+
+                    let gl_trans = trans.to_gl();
+                    let gl_proj = proj.to_gl();
+                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(1.0, 1.0, 1.0, 1.0), 1.0);
+                }
+
                 let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
 
                 // Remove labels that overlap a tile boundary
-                to_draw.retain(|i| {
-                    let bbox = &boxes[*i];
+                // to_draw.retain(|i| {
+                //     let bbox = &boxes[*i];
 
-                    bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
-                        && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
-                });
+                //     bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f64
+                //         && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f64
+                // });
 
                 to_draw.sort_by_key(|i| labels[*i].rank);
 
                 // And select a set that doesn't overlap
-                label::select_nooverlap(&boxes, &mut to_draw);
+                // label::select_nooverlap(&boxes, &mut to_draw);
 
                 for i in to_draw {
                     let label = labels[i];
@@ -863,10 +883,10 @@ fn main() {
 
                     {
                         let mut text_transform = tile_trans.clone();
-                        text_transform.translate(&Vector2::new(label.pos.x, label.pos.y));
+                        text_transform.translate(&label.pos);
                         text_transform.rotate(label.orientation);
                         text_transform.translate(&Vector2::new(-max.x / 2.0, max.y / 2.0));
-                        text_transform.scale(&Vector2::new(size/grid_step/tile.extent as f64, size/grid_step/tile.extent as f64));
+                        text_transform.scale(&Vector2::new(size, size));
                         draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
                     }
                 }
