@@ -911,8 +911,8 @@ fn is_winding_correct(tris: &ActiveTriangulation, tri: usize) -> bool {
     let mut b = tris.verts[t[1]];
     let mut c = tris.verts[t[2]];
 
-    b.subv2(&a);
-    c.subv2(&a);
+    b -= a;
+    c -= a;
 
     return !b.cross(&c).is_sign_positive();
 }

@@ -195,7 +195,7 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/System/Library/Fonts/Optima.ttc", 0).unwrap();
+    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
 
     let mut chars = Vec::with_capacity(128);
 
@@ -338,10 +338,10 @@ fn size_ascii(font: &FontMap, text: &[u8]) -> (Vector2<f32>, Vector2<f32>) {
         let char = &font.chars[*c as usize];
 
         let mut char_min = Vector2::new(advance as f32, 0.0);
-        char_min.addv2(&char.bearing);
+        char_min += char.bearing;
 
         let mut char_max = char_min.clone();
-        char_max.addv2(&char.size);
+        char_max += char.size;
 
         min.min(&char_min);
         max.max(&char_max);
@@ -368,7 +368,7 @@ fn draw_ascii(projection: Transform, font: &FontMap, text: &[u8]) {
         let char = &font.chars[*c as usize];
 
         let mut pos = pen.clone();
-        pos.addv2(&char.bearing);
+        pos += char.bearing;
 
         let mut projection = projection.clone();
         projection.translate(&pos);
@@ -630,8 +630,8 @@ fn main() {
             // Calculate the mouse position in the world
             mouse_world.x = display.mouse_x as f64;
             mouse_world.y = display.mouse_y as f64;
-            mouse_world.divf(scale as f64);
-            mouse_world.addv2(&viewport_pos);
+            mouse_world /= scale as f64;
+            mouse_world += viewport_pos;
         }
 
         if display.size_change {
@@ -641,8 +641,8 @@ fn main() {
         if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
             if let Some(hold) = hold {
                 let mut diff = hold.clone();
-                diff.subv2(&mouse_world);
-                viewport_pos.addv2(&diff);
+                diff -= mouse_world;
+                viewport_pos += diff;
                 mouse_world = hold;
             } else {
                 hold = Some(mouse_world);
@@ -707,16 +707,16 @@ fn main() {
                 v2.apply_transform(&mvp2d32);
 
                 // The viewport transform
-                v1.addf(1.0);
-                v1.divf(2.0);
-                v2.addf(1.0);
-                v2.divf(2.0);
+                v1 += 1.0;
+                v1 /= 2.0;
+                v2 += 1.0;
+                v2 /= 2.0;
 
                 let display_size = Vector2::new(display.width as f32, display.height as f32);
-                v1.mulv2(&display_size);
-                v2.mulv2(&display_size);
+                v1 *= display_size;
+                v2 *= display_size;
 
-                v2.subv2(&v1);
+                v2 -= v1;
 
                 unsafe {
                     gl::Enable(gl::SCISSOR_TEST);
@@ -812,11 +812,11 @@ fn main() {
                             max.apply_transform(&mat3.into());
 
 
-                            // @HACK we place it in the middle of the baseline, but the middle of the
-                            // baselines is defined as the centerpoint between the start pen location and
-                            // the right side of the bounding box (which is not necessarily the ending pen
-                            // location). It might look better to use the middle of the bounding box in the
-                            // x direction.
+                            // @HACK we place it in the middle of the baseline, but the middle of
+                            // the baseline is defined as the centerpoint between the start pen
+                            // location and the right side of the bounding box (which is not
+                            // necessarily the ending pen location). It might look better to use
+                            // the middle of the bounding box in the x direction.
                             bbox.push((min, max));
                             labels.push(label);
                             size.push(lsize as f64);
@@ -829,24 +829,24 @@ fn main() {
                 // Calculate the axis aligned bouding box of each label
                 // @HACK: This is slightly misaligned since the box we are calculating the bound
                 // box for isn't centered at the same point as the bounding box, and correcting for
-                // that requires some global positioning I don't care about for now. It's going
-                // to be ever so slightly wrong.
+                // that requires some global positioning I don't care about for now. It's going to
+                // be ever so slightly wrong.
                 for (i, label) in labels.iter().enumerate() {
                     let (min, max) = bbox[i];
 
                     let mut max = max.clone();
-                    max.subv2(&min);
+                    max -= min;
 
                     let mut size = Vector2::new(
                         max.x as f64 * label.orientation.cos().abs() + max.y as f64 * label.orientation.sin().abs(),
                         max.x as f64 * label.orientation.sin().abs() + max.y as f64 * label.orientation.cos().abs(),
                     );
-                    size.divf(2.0);
+                    size /= 2.0;
 
                     let mut min = label.pos.clone();
-                    min.subv2(&size);
+                    min -= size;
                     let mut max = label.pos.clone();
-                    max.addv2(&size);
+                    max += size;
 
                     boxes.push(label::Box {
                         min, max
@@ -863,7 +863,7 @@ fn main() {
                         proj.rotate(label.orientation);
 
                         let mut size = max.clone();
-                        size.subv2(&min);
+                        size -= min;
 
                         trans.translate(&label.pos);
                         trans.rotate(label.orientation);
@@ -880,7 +880,7 @@ fn main() {
 
                         let mut trans = tile_trans.clone();
                         let mut size = bbox.max.clone();
-                        size.subv2(&bbox.min);
+                        size -= bbox.min;
 
                         trans.translate(&bbox.min);
 
@@ -919,7 +919,7 @@ fn main() {
                     max.apply_transform(&mat3.into());
 
                     let mut size = max.clone();
-                    size.subv2(&min);
+                    size -= min;
 
                     // Define too small as .1 percent of the window
                     size.x * -size.y > 0.001
@@ -936,7 +936,7 @@ fn main() {
                     let (min, max) = bbox[i];
 
                     let mut extent = max.clone();
-                    extent.subv2(&min);
+                    extent -= min;
 
                     {
                         let mut text_transform = tile_trans.clone();
@@ -945,7 +945,7 @@ fn main() {
                         text_transform.translate(&Vector2::new(-max.x / 2.0, -extent.y/2.0-min.y));
                         text_transform.scale(&Vector2::new(2.0_f64.powi(tile.z as i32 - 15), 2.0_f64.powi(tile.z as i32 - 15)));
                         text_transform.scale(&Vector2::new(size, size));
-                        draw_ascii(text_transform.clone(), &font, label.text.as_bytes());
+                        draw_ascii(text_transform, &font, label.text.as_bytes());
                     }
                 }
             }
@@ -954,32 +954,13 @@ fn main() {
                 gl::Disable(gl::SCISSOR_TEST);
             }
 
-            // unsafe {
-            //     gl::UseProgram(shader_program.program);
-
-            //     gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
-            //     gl::BindVertexArray(border.vao);
-
-            //     gl::Uniform1f(shader_program.width, 10.0);
-            //     gl::Uniform4f(shader_program.fill_color, 1.0, 0.0, 0.0, 1.0);
-            //     gl::DrawArrays(gl::TRIANGLES, 0, border.vertex_len as _);
-
-            //     gl::BindVertexArray(0);
-            // }
-
             {
                 let mut text_transform = tile_trans.clone();
-                text_transform.scale(&Vector2::new(8.0, 8.0));
-                {
-                    let mut text_transform = text_transform.clone();
-                    text_transform.translate(&Vector2::new(10.0, 16.0));
-                    draw_ascii(text_transform.clone(), &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes());
-                }
-                {
-                    let mut text_transform = text_transform.clone();
-                    text_transform.translate(&Vector2::new(10.0, 32.0));
-                    draw_ascii(text_transform.clone(), &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes());
-                }
+                text_transform.scale(&Vector2::new(4.0, 4.0));
+                text_transform.translate(&Vector2::new(10.0, 32.0));
+                draw_ascii(text_transform.clone(), &font, format!("X {} Y {} Z {}", tile.x, tile.y, tile.z).as_bytes());
+                text_transform.translate(&Vector2::new(0.0, 32.0));
+                draw_ascii(text_transform.clone(), &font, format!("TID {} ID {}", tile.tid, mapbox::pmtile::coords_to_id(tile.x, tile.y, tile.z)).as_bytes());
             }
         }
 

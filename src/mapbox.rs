@@ -1463,7 +1463,7 @@ pub mod pmtile {
             let cy = lv.y;
 
             let mut ltov = v1.clone();
-            ltov.subv2(&lv);
+            ltov -= lv;
 
             let mut normal = ltov.clone();
             normal.normal();
@@ -1561,9 +1561,9 @@ pub mod pmtile {
                     let mut next = Vector2::new(next.x, next.y);
 
                     let mut into = current.clone();
-                    into.subv2(&prev);
+                    into -= prev;
 
-                    next.subv2(&current);
+                    next -= current;
 
                     into.unit();
                     next.unit();
@@ -1571,13 +1571,13 @@ pub mod pmtile {
                     into.normal();
                     next.normal();
 
-                    into.addv2(&next);
+                    into += next;
                     into.unit();
 
                     let cos_angle = into.dot(&next);
                     let l = 1.0 / cos_angle;
 
-                    into.mulf(l);
+                    into *= l;
 
                     normals.push(into);
                 }
@@ -1671,7 +1671,7 @@ pub mod pmtile {
                         x: p2.x as f64,
                         y: p2.y as f64,
                     };
-                    v2.subv2(&v1);
+                    v2 -= v1;
                     len += v2.len();
                 }
 
@@ -1693,10 +1693,10 @@ pub mod pmtile {
                         x: p2.x as f64,
                         y: p2.y as f64,
                     };
-                    v2.subv2(&v1);
+                    v2 -= v1;
 
                     let segment_len = v2.len();
-                    v2.divf(segment_len);
+                    v2 /= segment_len;
 
                     let mut orientation = v2.angle();
                     // Rotate the labels if they would be upside down
@@ -1712,8 +1712,8 @@ pub mod pmtile {
                         assert!(next >= 0.0);
 
                         let mut pos = v2.clone();
-                        pos.mulf(next);
-                        pos.addv2(&v1);
+                        pos *= next;
+                        pos += v1;
 
                         if let Some(text) = text {
                             labels.push(Label{

@@ -35,57 +35,51 @@ impl <T> Vector2<T> {
     }
 }
 
-impl <T> Vector2<T>
+impl <T> std::ops::AddAssign<Self> for Vector2<T>
     where T: std::ops::AddAssign<T> + Copy {
-
-    pub fn addf(&mut self, val: T) {
-        self.x += val;
-        self.y += val;
+    fn add_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
     }
 }
 
-impl <T> Vector2<T>
+impl <T> std::ops::AddAssign<T> for Vector2<T>
+    where T: std::ops::AddAssign<T> + Copy {
+    fn add_assign(&mut self, rhs: T) {
+        self.x += rhs;
+        self.y += rhs;
+    }
+}
+
+impl <T> std::ops::DivAssign<T> for Vector2<T>
     where T: std::ops::DivAssign<T> + Copy {
-
-    pub fn divf(&mut self, val: T) {
-        self.x /= val;
-        self.y /= val;
+    fn div_assign(&mut self, rhs: T) {
+        self.x /= rhs;
+        self.y /= rhs;
     }
 }
 
-impl <T> Vector2<T>
+impl <T> std::ops::MulAssign<T> for Vector2<T>
     where T: std::ops::MulAssign<T> + Copy {
-
-    pub fn mulf(&mut self, val: T) {
-        self.x *= val;
-        self.y *= val;
+    fn mul_assign(&mut self, rhs: T) {
+        self.x *= rhs;
+        self.y *= rhs;
     }
 }
 
-impl <T> Vector2<T>
-    where T: std::ops::AddAssign<T> + Copy {
-
-    pub fn addv2(&mut self, other: &Vector2<T>) {
-        self.x += other.x;
-        self.y += other.y;
-    }
-}
-
-impl <T> Vector2<T>
+impl <T> std::ops::SubAssign<Self> for Vector2<T>
     where T: std::ops::SubAssign<T> + Copy {
-
-    pub fn subv2(&mut self, other: &Vector2<T>) {
-        self.x -= other.x;
-        self.y -= other.y;
+    fn sub_assign(&mut self, rhs: Self) {
+        self.x -= rhs.x;
+        self.y -= rhs.y;
     }
 }
 
-impl <T> Vector2<T>
-    where T: std::ops::Neg<Output = T> + Copy {
-
-    pub fn negate(&mut self) {
-        self.x = -self.x;
-        self.y = -self.y;
+impl <T> std::ops::MulAssign<Self> for Vector2<T>
+    where T: std::ops::MulAssign<T> + Copy {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.x *= rhs.x;
+        self.y *= rhs.y;
     }
 }
 
@@ -141,18 +135,15 @@ impl <T> Vector2<T>
     }
 }
 
-
-impl Vector2<f32> {
-    pub fn apply_transform(&mut self, mat: &[f32; 9]) {
+impl <T> Vector2<T>
+    where T: std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
+    pub fn apply_transform(&mut self, mat: &[T; 9]) {
         self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
         self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
     }
+}
 
-    pub fn mulv2(&mut self, other: &Self) {
-        self.x *= other.x;
-        self.y *= other.y;
-    }
-
+impl Vector2<f32> {
     pub fn min(&mut self, other: &Self) {
         self.x = self.x.min(other.x);
         self.y = self.y.min(other.y);
@@ -169,16 +160,6 @@ impl Vector2<f32> {
 }
 
 impl Vector2<f64> {
-    pub fn apply_transform(&mut self, mat: &[f64; 9]) {
-        self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
-        self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
-    }
-
-    pub fn mulv2(&mut self, other: &Self) {
-        self.x *= other.x;
-        self.y *= other.y;
-    }
-
     pub fn angle(&mut self) -> f64 {
         return f64::atan2(self.y, self.x);
     }
@@ -198,12 +179,6 @@ pub const MAT4_IDENTITY: Mat4 = Mat4{ data: [
 pub struct Mat3 {
     pub data: [f64; 9],
 }
-
-pub const MAT3_IDENTITY: Mat3 = Mat3{ data: [
-           1.0,    0.0,    0.0,
-           0.0,    1.0,    0.0,
-           0.0,    0.0,    1.0,
-]};
 
 impl Mat4 {
     pub fn ortho(left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) -> Self {
