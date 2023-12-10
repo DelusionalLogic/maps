@@ -1,12 +1,12 @@
-mod triangulate;
-mod math;
-mod mapbox;
-mod label;
 extern crate freetype;
 
-use math::Vector2;
-use math::Mat4;
-use math::Mat3;
+use maps::font::FontMetric;
+use maps::mapbox;
+use maps::math::Vector2;
+use maps::triangulate;
+use maps::label;
+use maps::math::Mat4;
+use maps::math::Mat3;
 
 use std::convert::TryInto;
 use std::ffi::CString;
@@ -29,13 +29,13 @@ struct Transform {
 impl Transform {
     pub fn from_mat(source: Mat4) -> Self {
         return Transform{
-            mats: [source, math::MAT4_IDENTITY],
+            mats: [source, maps::math::MAT4_IDENTITY],
             primary: false,
         };
     }
 
     pub fn identity() -> Self {
-        return Self::from_mat(math::MAT4_IDENTITY);
+        return Self::from_mat(maps::math::MAT4_IDENTITY);
     }
 
     fn split(&self) -> (usize, usize) {
@@ -61,7 +61,7 @@ impl Transform {
         self.apply(&Mat4::rotate_2d(theta.into()));
     }
 
-    pub fn scale<T: Into<f64> + Copy>(&mut self, scale: &Vector2<T>) {
+    pub fn scale<T: Into<f64> + Copy>(&mut self, scale: &maps::math::Vector2<T>) {
         self.apply(&Mat4::scale_2d(scale.x.into(), scale.y.into()));
     }
 
@@ -160,15 +160,16 @@ pub struct LineProg {
     fill_color: i32,
 }
 
-struct Character {
-    size: Vector2<f32>,
+struct TexInfo {
     bearing: Vector2<f32>,
-    advance: f32,
-    texture: u32,
+    size: Vector2<f32>,
 }
 
 struct FontMap {
-    chars: Vec<Character>,
+    metrics: FontMetric,
+
+    textures: Vec<u32>,
+    texinfo: Vec<TexInfo>,
 
     shader: u32,
     uni_transform: i32,
@@ -180,11 +181,7 @@ struct FontMap {
 
 impl Drop for FontMap {
     fn drop(&mut self) {
-        let mut textures = Vec::with_capacity(self.chars.len());
-        for char in &self.chars {
-            textures.push(char.texture);
-        }
-        unsafe{ gl::DeleteTextures(textures.len().try_into().unwrap(), textures.as_ptr()) };
+        unsafe{ gl::DeleteTextures(self.textures.len().try_into().unwrap(), self.textures.as_ptr()) };
 
         unsafe{ gl::DeleteProgram(self.shader) };
 
@@ -196,12 +193,12 @@ impl Drop for FontMap {
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
     let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
+    face.set_pixel_sizes(0, 32).unwrap();
+    let font = FontMetric::load(&face);
 
-    let mut chars = Vec::with_capacity(128);
-
-    let mut textures = [0; 128];
+    let mut textures = vec![0; font.chars.len()];
     unsafe{ gl::GenTextures(textures.len() as i32, textures.as_mut_ptr()) };
-    for i in 0..128 {
+    for i in 0..textures.len() {
         unsafe{
             gl::BindTexture(gl::TEXTURE_2D, textures[i]);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
@@ -211,19 +208,14 @@ fn load_font() -> FontMap {
         }
     }
 
-    face.set_pixel_sizes(0, 32).unwrap();
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
-    for i in 0..128 {
+
+    let mut texinfo = Vec::with_capacity(font.chars.len());
+    for i in 0..textures.len() {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
         let glyph = face.glyph();
         glyph.render_glyph(freetype::render_mode::RenderMode::Sdf).unwrap();
         let bitmap = glyph.bitmap();
-        let size = Vector2::new(bitmap.width() as f32, bitmap.rows() as f32);
-        let bearing = Vector2::new(
-            glyph.bitmap_left() as f32,
-            -glyph.bitmap_top() as f32,
-        );
-        let advance = (glyph.advance().x >> 6) as f32;
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, textures[i]);
@@ -241,11 +233,9 @@ fn load_font() -> FontMap {
             );
         };
 
-        chars.push(Character {
-            size,
-            bearing,
-            advance,
-            texture: textures[i],
+        texinfo.push(TexInfo {
+            bearing: Vector2::new(glyph.bitmap_left() as f32, -glyph.bitmap_top() as f32),
+            size: Vector2::new(bitmap.width() as f32, bitmap.rows() as f32)
         });
     }
 
@@ -315,7 +305,9 @@ fn load_font() -> FontMap {
     }
 
     return FontMap{
-        chars,
+        metrics: font,
+        textures,
+        texinfo,
         shader: program,
         uni_texture,
         uni_transform,
@@ -323,32 +315,6 @@ fn load_font() -> FontMap {
         vao,
         vbo,
     };
-}
-
-// @CLEANUP @UX: This calculation is a little strange. I'm pretty sure the SDF rendering is messing
-// with the bitmap size, causing us to resolve a bounding box that's too large for the label. It's
-// good enough for now, but looks bad.
-fn size_ascii(font: &FontMap, text: &[u8]) -> (Vector2<f32>, Vector2<f32>) {
-    let mut advance = 0.0;
-    let mut max = Vector2::new(0.0, 0.0);
-    let mut min = Vector2::new(0.0, 0.0);
-
-    for c in text {
-        if *c >= 128 { continue; }
-        let char = &font.chars[*c as usize];
-
-        let mut char_min = Vector2::new(advance as f32, 0.0);
-        char_min += char.bearing;
-
-        let mut char_max = char_min.clone();
-        char_max += char.size;
-
-        min.min(&char_min);
-        max.max(&char_max);
-        advance += char.advance;
-    }
-
-    return (min, max);
 }
 
 fn draw_ascii(projection: Transform, font: &FontMap, text: &[u8]) {
@@ -365,24 +331,25 @@ fn draw_ascii(projection: Transform, font: &FontMap, text: &[u8]) {
     let mut pen = Vector2::new(0.0, 0.0);
     for c in text {
         if *c >= 128 { continue; }
-        let char = &font.chars[*c as usize];
+        let char = &font.metrics.chars[*c as usize];
+        let tchar = &font.texinfo[*c as usize];
 
         let mut pos = pen.clone();
-        pos += char.bearing;
+        pos += tchar.bearing;
 
         let mut projection = projection.clone();
         projection.translate(&pos);
-        projection.scale(&char.size);
+        projection.scale(&tchar.size);
         let mvp32: [f32; 16] = projection.to_gl();
 
         unsafe {
-            gl::BindTexture(gl::TEXTURE_2D, char.texture);
+            gl::BindTexture(gl::TEXTURE_2D, font.textures[*c as usize]);
             gl::UniformMatrix4fv(font.uni_transform, 1, gl::TRUE, mvp32.as_ptr());
             gl::BindVertexArray(font.vao);
             gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
         }
 
-        pen.x += char.advance;
+        pen.x += char.advance as f32;
     }
 }
 
@@ -788,7 +755,7 @@ fn main() {
                 for (roads, lsize) in road_layers {
                     if let Some(roads) = roads {
                         for label in &roads.labels {
-                            let (mut min, mut max) = size_ascii(&font, label.text.as_bytes());
+                            let (mut min, mut max) = font.metrics.size_str(label.text.as_bytes());
 
                             let mut transform = Transform::identity();
                             let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32;
@@ -800,7 +767,6 @@ fn main() {
                             let mat3 : &Mat3 = &transform.mat().into();
                             min.apply_transform(&mat3.into());
                             max.apply_transform(&mat3.into());
-
 
                             // @HACK we place it in the middle of the baseline, but the middle of
                             // the baseline is defined as the centerpoint between the start pen
@@ -857,7 +823,7 @@ fn main() {
 
                         trans.translate(&label.pos);
                         trans.rotate(label.orientation);
-                        trans.translate(&Vector2::new(-max.x / 2.0, min.y));
+                        trans.translate(&Vector2::new(-size.x / 2.0, -size.y/2.0));
                         trans.scale(&Vector2::new(size.x/border.extent as f32, size.y/border.extent as f32));
 
                         let gl_trans = trans.to_gl();
@@ -932,7 +898,7 @@ fn main() {
                         let mut text_transform = tile_trans.clone();
                         text_transform.translate(&label.pos);
                         text_transform.rotate(label.orientation);
-                        text_transform.translate(&Vector2::new(-max.x / 2.0, -extent.y/2.0-min.y));
+                        text_transform.translate(&Vector2::new(-extent.x / 2.0, -extent.y/2.0-min.y));
                         text_transform.scale(&Vector2::new(2.0_f64.powi(tile.z as i32 - 15), 2.0_f64.powi(tile.z as i32 - 15)));
                         text_transform.scale(&Vector2::new(size, size));
                         draw_ascii(text_transform, &font, label.text.as_bytes());

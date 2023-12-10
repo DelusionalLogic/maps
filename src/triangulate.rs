@@ -245,7 +245,7 @@ impl ActiveTriangulation {
         };
     }
 
-    fn explicit(verts: &[Vector], tris: &[[usize; 3]]) -> Self {
+    pub fn explicit(verts: &[Vector], tris: &[[usize; 3]]) -> Self {
         let adj = build_adjecency(tris);
         let mut inverse_tri = vec![TriSide{tri: 0, side: 0}; verts.len()];
 
@@ -896,72 +896,6 @@ impl ActiveTriangulation {
     }
 }
 
-#[derive(Debug)]
-enum ValidationError {
-    InvalidStructure,
-    InvalidInverse,
-    InvalidAdjecency,
-    BadWinding,
-    MissingEdges,
-}
-
-fn is_winding_correct(tris: &ActiveTriangulation, tri: usize) -> bool {
-    let t = tris.tris[tri];
-    let a = tris.verts[t[0]];
-    let mut b = tris.verts[t[1]];
-    let mut c = tris.verts[t[2]];
-
-    b -= a;
-    c -= a;
-
-    return !b.cross(&c).is_sign_positive();
-}
-
-fn validate_mesh(tris: &ActiveTriangulation) -> Option<ValidationError> {
-    if tris.verts.len() != tris.inverse_tri.len() { return Some(ValidationError::InvalidStructure); };
-    if  tris.tris.len() !=         tris.adj.len() { return Some(ValidationError::InvalidStructure) ; }
-
-    // All verts in the vert -> tri lookup array point to themselves
-    {
-        for (i, &x) in tris.inverse_tri.iter().enumerate() {
-            if x.side > 2 { return Some(ValidationError::InvalidStructure); }
-            if tris.tris[x.tri][x.side as usize] != i { return Some(ValidationError::InvalidInverse); }
-        }
-    };
-
-    // Check the adjecency by just building it again and checking that it's the same. There's
-    // only one valid adjencency array for a given topology, so this should be robust
-    {
-        let adj = build_adjecency(&tris.tris);
-        if tris.adj != adj { return Some(ValidationError::InvalidAdjecency); }
-    };
-
-    // Check the winding on the triangles
-    {
-        for i in 0..tris.tris.len() {
-            if !is_winding_correct(tris, i) { return Some(ValidationError::BadWinding); }
-        }
-    }
-
-    // Check that the edges are honored
-    {
-        let mut edges = tris.edges.clone();
-        for i in 0..tris.tris.len() {
-            let tri = tris.tris[i];
-            for j in 0..3 {
-                let next = anticlockwise(j);
-                edges.remove(&[tri[j as usize], tri[next as usize]]);
-            }
-        }
-        if edges.len() > 0 {
-            return Some(ValidationError::MissingEdges);
-        }
-    }
-
-    return None;
-}
-
-
 fn incircle(a: Vector, b: Vector, c: Vector, d: &Vector) -> bool {
     let det = robust::incircle(
         robust::Coord{x: a.x, y: a.y},
@@ -1078,6 +1012,71 @@ fn locate_point_in_tri(p0: &Vector, p1: &Vector, p2: &Vector, p: &Vector) -> Tri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    enum ValidationError {
+        InvalidStructure,
+        InvalidInverse,
+        InvalidAdjecency,
+        BadWinding,
+        MissingEdges,
+    }
+
+    pub fn is_winding_correct(tris: &ActiveTriangulation, tri: usize) -> bool {
+        let t = tris.tris[tri];
+        let a = tris.verts[t[0]];
+        let mut b = tris.verts[t[1]];
+        let mut c = tris.verts[t[2]];
+
+        b -= a;
+        c -= a;
+
+        return !b.cross(&c).is_sign_positive();
+    }
+
+    fn validate_mesh(tris: &ActiveTriangulation) -> Option<ValidationError> {
+        if tris.verts.len() != tris.inverse_tri.len() { return Some(ValidationError::InvalidStructure); };
+        if  tris.tris.len() !=         tris.adj.len() { return Some(ValidationError::InvalidStructure) ; }
+
+        // All verts in the vert -> tri lookup array point to themselves
+        {
+            for (i, &x) in tris.inverse_tri.iter().enumerate() {
+                if x.side > 2 { return Some(ValidationError::InvalidStructure); }
+                if tris.tris[x.tri][x.side as usize] != i { return Some(ValidationError::InvalidInverse); }
+            }
+        };
+
+        // Check the adjecency by just building it again and checking that it's the same. There's
+        // only one valid adjencency array for a given topology, so this should be robust
+        {
+            let adj = build_adjecency(&tris.tris);
+            if tris.adj != adj { return Some(ValidationError::InvalidAdjecency); }
+        };
+
+        // Check the winding on the triangles
+        {
+            for i in 0..tris.tris.len() {
+                if !is_winding_correct(tris, i) { return Some(ValidationError::BadWinding); }
+            }
+        }
+
+        // Check that the edges are honored
+        {
+            let mut edges = tris.edges.clone();
+            for i in 0..tris.tris.len() {
+                let tri = tris.tris[i];
+                for j in 0..3 {
+                    let next = anticlockwise(j);
+                    edges.remove(&[tri[j as usize], tri[next as usize]]);
+                }
+            }
+            if edges.len() > 0 {
+                return Some(ValidationError::MissingEdges);
+            }
+        }
+
+        return None;
+    }
 
     #[test]
     fn incircle_fuzz() {

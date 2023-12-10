@@ -1,5 +1,3 @@
-use std::collections::{BinaryHeap, HashMap};
-
 pub mod pbuf {
     use std::io::Read;
 
@@ -1125,7 +1123,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         }
     };
 
-    let (landuse, farmland, areas) = if let Some(layer) = &mut layer_messages[3] {
+    let (_landuse, farmland, areas) = if let Some(layer) = &mut layer_messages[3] {
         read_landuse_layer(layer)?
     } else {
         (
@@ -1524,7 +1522,7 @@ pub mod pmtile {
     fn compile_tile<R: Renderer>(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
         let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
-        fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, z: u8) -> R::Layer {
+        fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
             let poly_start = &raw_tile.start;
             let polys = &mut raw_tile.data;
             let mut tri_polys : Vec<super::LineVert> = vec![];
