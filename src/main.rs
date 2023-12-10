@@ -393,20 +393,22 @@ fn main() {
     glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
     glfw.window_hint(glfw::WindowHint::Resizable(true));
 
-    let mut display;
+    glfw.window_hint(glfw::WindowHint::X11ClassName(Some("maps".to_string())));
+    glfw.window_hint(glfw::WindowHint::X11InstanceName(Some("maps".to_string())));
     let (mut window, events) = glfw.create_window(WIDTH, HEIGHT, TITLE, glfw::WindowMode::Windowed).unwrap();
-    {
+    let mut display = {
         let (mouse_x, mouse_y) = window.get_cursor_pos();
         let (cx, cy) = window.get_content_scale();
         let (screen_width, screen_height) = window.get_framebuffer_size();
-        display = DisplayState{
+
+        DisplayState{
             width: screen_width,
             height: screen_height,
             size_change: true,
             mouse_x: mouse_x * cx as f64,
             mouse_y: mouse_y * cy as f64,
         }
-    }
+    };
 
     window.make_current();
     window.set_key_polling(true);
@@ -574,22 +576,6 @@ fn main() {
         }
     }
 
-    // unsafe {
-    //     gl::BindVertexArray(vao);
-
-    //     gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-    //     gl::BufferData(gl::ARRAY_BUFFER, (vertecies.len() * std::mem::size_of::<f32>()) as _, vertecies.as_ptr().cast(), gl::STATIC_DRAW);
-
-    //     gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, 0 as *const _);
-    //     gl::EnableVertexAttribArray(0);
-    //     gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 5 * std::mem::size_of::<f32>() as i32, (3 * std::mem::size_of::<f32>()) as *const _);
-    //     gl::EnableVertexAttribArray(1);
-
-    //     gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-    //     gl::BindVertexArray(0);
-    // }
-    // let file = std::fs::File::open("aalborg.mvt").unwrap();
-    // let tile = compile_tile(0, 0, 0, file).unwrap();
     let border = mapbox::pmtile::placeholder_tile(0, 0, 0);
 
     // -------------------------------------------
@@ -686,11 +672,15 @@ fn main() {
 
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
-            let xcoord = tile.x as f64 * grid_step;
-            let ycoord = tile.y as f64 * grid_step;
-            // Transform the tilelocal coordinates to global coordinates
-            tile_trans.translate(&Vector2::new(xcoord, ycoord));
-            tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
+            let tile_trans = {
+                let xcoord = tile.x as f64 * grid_step;
+                let ycoord = tile.y as f64 * grid_step;
+                // Transform the tilelocal coordinates to global coordinates
+                tile_trans.translate(&Vector2::new(xcoord, ycoord));
+                tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
+
+                tile_trans
+            };
             // Here we can truncate
 
 

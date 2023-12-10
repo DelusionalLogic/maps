@@ -1677,8 +1677,14 @@ pub mod pmtile {
 
                 len /= 2.0;
 
-                let distance_between_labels = 400.0;
+                let distance_between_labels = 100.0;
+                // @COMPLETE: I just start the steps from the start of the line. Ideally, we'd want
+                // the center label to have rank 0 and then emit from there. That requires us to
+                // calculate the start rank somehow, which I don't care to do right now.
+                let rank_steps = 4;
                 let mut next = len % distance_between_labels;
+                let mut rank = 0 + z as i16;
+                let mut rank_direction = 1;
 
                 // Walk the line, placing labels as we go
                 for j in 0..(end-start)/6 {
@@ -1717,12 +1723,16 @@ pub mod pmtile {
 
                         if let Some(text) = text {
                             labels.push(Label{
-                                rank: 1,
+                                rank: rank as u8,
                                 text: strings[text].clone(),
-                                // text: format!("A"),
                                 pos,
                                 orientation,
                             });
+                        }
+
+                        rank += rank_direction;
+                        if rank >= rank_steps-1 || rank <= 0 {
+                            rank_direction = -rank_direction;
                         }
 
                         next += distance_between_labels;
@@ -1738,11 +1748,11 @@ pub mod pmtile {
 
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, z)),
-            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, z)),
-            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, z)),
-            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, z)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, z)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, 4)),
+            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, 0)),
+            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, 1)),
+            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, 2)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, 3)),
             buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
             water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
