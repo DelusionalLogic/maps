@@ -192,7 +192,14 @@ impl Drop for FontMap {
 
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
-    let face = freetype.new_face("/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf", 0).unwrap();
+
+    let font_path = if cfg!(unix) {
+        "/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf"
+    } else {
+        "/System/Library/Fonts/Optima.ttc"
+    };
+
+    let face = freetype.new_face(font_path, 0).unwrap();
     face.set_pixel_sizes(0, 32).unwrap();
     let font = FontMetric::load(&face);
 
