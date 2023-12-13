@@ -1,3 +1,5 @@
+use crate::math::Vector2;
+
 pub mod pbuf {
     use std::io::Read;
 
@@ -545,7 +547,7 @@ pub struct RawTile {
     pub medium: LineGeom,
     pub minor: LineGeom,
 
-    pub points: PolyGeom,
+    pub points: Vec<Vector2<f32>>,
 
     pub strings: Vec<String>,
 }
@@ -1123,11 +1125,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
 
-                                        geom.start.push(LineStart{pos: geom.data.len()});
-                                        geom.data.push(LineVert { x:x-1.0, y:y-1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
-                                        geom.data.push(LineVert { x:x+1.0, y:y-1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
-                                        geom.data.push(LineVert { x:x+1.0, y:y+1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
-                                        geom.data.push(LineVert { x:x-1.0, y:y+1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                        geom.push(Vector2::new(x, y));
                                     } else {
                                         panic!("Unknown command");
                                     }
@@ -1195,7 +1193,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         farmland,
         areas,
 
-        points: PolyGeom{ start: vec![], data: vec![] },
+        points: Vec::new(),
 
         strings: Vec::new(),
     };
@@ -1705,6 +1703,16 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
+        fn compile_point_layer<R: Renderer>(raw_tile: &Vec<Vector2<f32>>, _z: u8) -> R::Layer {
+            let mut tri_polys = Vec::new();
+            for v in raw_tile {
+                tri_polys.push(super::LineVert { x:   v.x as f32 - 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                tri_polys.push(super::LineVert { x:   v.x as f32 - 10.0, y:   v.y as f32 + 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                tri_polys.push(super::LineVert { x:   v.x as f32 + 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+            }
+            return R::upload_layer(&tri_polys, Vec::new());
+        }
+
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
             let mut labels = Vec::new();
             // Generate labels
@@ -1805,8 +1813,6 @@ pub mod pmtile {
             return R::upload_layer(&raw_tile.data, labels);
         }
 
-        dbg!(&raw_tile.points.data);
-
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
             roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, 4)),
@@ -1819,7 +1825,7 @@ pub mod pmtile {
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
             areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
 
-            points: Some(compile_polygon_layer::<R>(&mut raw_tile.points, z)),
+            points: Some(compile_point_layer::<R>(&mut raw_tile.points, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
