@@ -498,7 +498,7 @@ pub mod pbuf {
 
 #[derive(Clone,Copy,Debug)]
 #[repr(packed)]
-pub struct LineVert {
+pub struct GlVert {
     pub x: f32,
     pub y: f32,
     pub norm_x: f32,
@@ -514,24 +514,23 @@ pub struct LineStart {
 pub struct LineGeom {
     start: Vec<LineStart>,
     name: Vec<Option<usize>>,
-    data: Vec<LineVert>,
+    data: Vec<Vector2<f32>>,
 }
 
 impl LineGeom {
     pub fn new() -> Self {
-        return LineGeom {
-
+        return LineGeom{
             start: Vec::new(),
             name: Vec::new(),
             data: Vec::new(),
-        };
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct PolyGeom {
     start: Vec<LineStart>,
-    data: Vec<LineVert>,
+    data: Vec<GlVert>,
 }
 
 pub struct RawTile {
@@ -887,7 +886,6 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         tile.strings.append(&mut names);
 
         fn read_geometry(features: Vec<(pbuf::Message, Option<usize>)>, name_index: &Vec<usize>, offset: usize, geom: &mut LineGeom) -> pbuf::Result<()> {
-            let mut vert = pmtile::Line::new_under(&mut geom.data);
 
             for (mut reader, namei) in features {
                 while let Ok(field) = reader.next() {
@@ -904,18 +902,18 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                     let y = pbuf::decode_zig(it.next().unwrap().unwrap());
                                     cy += y as f32;
 
-                                    geom.start.push(LineStart{pos: vert.verts.len()});
+                                    geom.start.push(LineStart{pos: geom.data.len()});
                                     // @Speed: Maybe we can avoid this memcpy somehow.
                                     geom.name.push(namei.map(|x| offset + name_index[x]));
-                                    // Don't push any verts until the line is drawn
+                                    geom.data.push(crate::math::Vector2 { x: cx, y: cy });
                                 } else if (cmd & 7) == 2 { // LineTo
-                                    for i in 0..(cmd >> 3) {
+                                    for _ in 0..(cmd >> 3) {
                                         let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let px = cx + x;
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let py = cy + y;
 
-                                        vert.add_point(crate::math::Vector2 { x: cx, y: cy }, crate::math::Vector2 { x: px, y: py }, i != 0, true);
+                                        geom.data.push(crate::math::Vector2 { x: px, y: py });
 
                                         cx = px;
                                         cy = py;
@@ -955,7 +953,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
         fn read_geometry(features: &mut Vec<pbuf::Message>) -> pbuf::Result<PolyGeom> {
             let mut poly_start : Vec<LineStart> = vec![];
-            let mut polys : Vec<LineVert> = vec![];
+            let mut polys : Vec<GlVert> = vec![];
 
             for reader in features {
                 while let Ok(field) = reader.next() {
@@ -978,7 +976,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                     cy += y as f32;
 
                                     poly_start.push(LineStart{pos: polys.len()});
-                                    polys.push(LineVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                                    polys.push(GlVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
                                     start_x = cx;
                                     start_y = cy;
                                 } else if (cmd & 7) == 2 { // LineTo
@@ -990,7 +988,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let py = cy + y;
 
-                                        polys.push(LineVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                        polys.push(GlVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
 
                                         cx = px;
                                         cy = py;
@@ -1024,7 +1022,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
     fn read_poly_layer(reader: &mut pbuf::Message) -> pbuf::Result<PolyGeom> {
         let mut poly_start : Vec<LineStart> = vec![];
-        let mut polys : Vec<LineVert> = vec![];
+        let mut polys : Vec<GlVert> = vec![];
 
         while let Ok(field) = reader.next() {
             match field {
@@ -1055,7 +1053,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         cy += y as f32;
 
                                         poly_start.push(LineStart{pos: polys.len()});
-                                        polys.push(LineVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                                        polys.push(GlVert { x: cx, y: cy, norm_x: 0.0, norm_y: 0.0, sign: 0 });
                                         start_x = cx;
                                         start_y = cy;
                                     } else if (cmd & 7) == 2 { // LineTo
@@ -1067,7 +1065,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                             let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                             let py = cy + y;
 
-                                            polys.push(LineVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                            polys.push(GlVert { x: px, y: py, norm_x: 0.0, norm_y: 0.0, sign: 1 });
 
                                             cx = px;
                                             cy = py;
@@ -1182,7 +1180,8 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         )
     };
 
-    let mut tile = RawTile { roads: LineGeom::new(),
+    let mut tile = RawTile {
+        roads: LineGeom::new(),
         highways: LineGeom::new(),
         major: LineGeom::new(),
         medium: LineGeom::new(),
@@ -1358,12 +1357,12 @@ pub mod pmtile {
     pub trait Renderer {
         type Layer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::LineVert>, labels: Vec<Label>) -> Self::Layer;
+        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Self::Layer;
     }
 
     pub struct GL { }
 
-    fn polygon_area_two(polys: &[crate::mapbox::LineVert]) -> f32 {
+    fn polygon_area_two(polys: &[crate::mapbox::GlVert]) -> f32 {
         let start = 0;
         let end = polys.len();
 
@@ -1379,7 +1378,7 @@ pub mod pmtile {
     impl Renderer for GL {
         type Layer = Layer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::LineVert>, labels: Vec<Label>) -> Layer {
+        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Layer {
             let mut vao = 0;
             unsafe { gl::GenVertexArrays(1, &mut vao) };
 
@@ -1390,13 +1389,13 @@ pub mod pmtile {
                 gl::BindVertexArray(vao);
 
                 gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::LineVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
+                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::GlVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
 
-                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, 0 as *const _);
                 gl::EnableVertexAttribArray(0);
-                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
                 gl::EnableVertexAttribArray(1);
-                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
                 gl::EnableVertexAttribArray(2);
 
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
@@ -1498,19 +1497,19 @@ pub mod pmtile {
         }
     }
 
-    pub struct Line<'a> {
-        pub verts: Ownership<'a, Vec<super::LineVert>>,
+    pub struct LineBuilder<'a> {
+        pub verts: Ownership<'a, Vec<super::GlVert>>,
     }
 
-    impl <'a> Line<'a> {
+    impl <'a> LineBuilder<'a> {
         pub fn new() -> Self {
-            return Line{
+            return LineBuilder{
                 verts: Ownership::Owned(Vec::new()),
             };
         }
 
-        pub fn new_under(under: &'a mut Vec<super::LineVert>) -> Self {
-            return Line{
+        pub fn new_under(under: &'a mut Vec<super::GlVert>) -> Self {
+            return LineBuilder{
                 verts: Ownership::Unowned(under),
             };
         }
@@ -1567,13 +1566,13 @@ pub mod pmtile {
 
             if add_point {
                 // Now construct the tris
-                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
-                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
-                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+                self.verts.push(super::GlVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+                self.verts.push(super::GlVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+                self.verts.push(super::GlVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
 
-                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
-                self.verts.push(super::LineVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
-                self.verts.push(super::LineVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+                self.verts.push(super::GlVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+                self.verts.push(super::GlVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+                self.verts.push(super::GlVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
             }
         }
     }
@@ -1584,7 +1583,7 @@ pub mod pmtile {
         fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
             let poly_start = &raw_tile.start;
             let polys = &mut raw_tile.data;
-            let mut tri_polys : Vec<super::LineVert> = vec![];
+            let mut tri_polys : Vec<super::GlVert> = vec![];
 
             // Triangulate poly
             use crate::triangulate;
@@ -1693,9 +1692,9 @@ pub mod pmtile {
                     let n2 = normals[vid[tri[1]].unwrap()];
                     let n3 = normals[vid[tri[2]].unwrap()];
 
-                    tri_polys.push(super::LineVert { x:   p1.x as f32, y:   p1.y as f32, norm_x: n1.x, norm_y: n1.y, sign: 0 });
-                    tri_polys.push(super::LineVert { x:   p2.x as f32, y:   p2.y as f32, norm_x: n2.x, norm_y: n2.y, sign: 0 });
-                    tri_polys.push(super::LineVert { x:   p3.x as f32, y:   p3.y as f32, norm_x: n3.x, norm_y: n3.y, sign: 0 });
+                    tri_polys.push(super::GlVert { x:   p1.x as f32, y:   p1.y as f32, norm_x: n1.x, norm_y: n1.y, sign: 0 });
+                    tri_polys.push(super::GlVert { x:   p2.x as f32, y:   p2.y as f32, norm_x: n2.x, norm_y: n2.y, sign: 0 });
+                    tri_polys.push(super::GlVert { x:   p3.x as f32, y:   p3.y as f32, norm_x: n3.x, norm_y: n3.y, sign: 0 });
                 }
                 offset += polys_end - polys_start;
             }
@@ -1706,14 +1705,15 @@ pub mod pmtile {
         fn compile_point_layer<R: Renderer>(raw_tile: &Vec<Vector2<f32>>, _z: u8) -> R::Layer {
             let mut tri_polys = Vec::new();
             for v in raw_tile {
-                tri_polys.push(super::LineVert { x:   v.x as f32 - 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                tri_polys.push(super::LineVert { x:   v.x as f32 - 10.0, y:   v.y as f32 + 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                tri_polys.push(super::LineVert { x:   v.x as f32 + 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                tri_polys.push(super::GlVert { x:   v.x as f32 - 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                tri_polys.push(super::GlVert { x:   v.x as f32 - 10.0, y:   v.y as f32 + 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                tri_polys.push(super::GlVert { x:   v.x as f32 + 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
             }
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
+            let mut line = LineBuilder::new();
             let mut labels = Vec::new();
             // Generate labels
             for i in 0..raw_tile.start.len() {
@@ -1726,9 +1726,9 @@ pub mod pmtile {
 
                 // Calculate the length of the line
                 let mut len = 0.0;
-                for j in 0..(end-start)/6 {
-                    let p1 = raw_tile.data[start + j*6];
-                    let p2 = raw_tile.data[start + j*6 + 2];
+                for j in 0..end-start-1 {
+                    let p1 = raw_tile.data[start + j];
+                    let p2 = raw_tile.data[start + j+1];
 
                     let v1 = Vector2 {
                         x: p1.x as f64,
@@ -1754,9 +1754,9 @@ pub mod pmtile {
                 let mut rank_direction = 1;
 
                 // Walk the line, placing labels as we go
-                for j in 0..(end-start)/6 {
-                    let p1 = raw_tile.data[start + j*6];
-                    let p2 = raw_tile.data[start + j*6 + 2];
+                for j in 0..end-start-1 {
+                    let p1 = raw_tile.data[start + j];
+                    let p2 = raw_tile.data[start + j+1];
 
                     let v1 = Vector2 {
                         x: p1.x as f64,
@@ -1807,10 +1807,16 @@ pub mod pmtile {
 
                     next -= segment_len;
                 }
+
+                for j in 0..end-start-1 {
+                    let p1 = raw_tile.data[start + j];
+                    let p2 = raw_tile.data[start + j+1];
+
+                    line.add_point(p1, p2, i!=0, true);
+                }
             }
 
-            // dbg!(&raw_tile.data);
-            return R::upload_layer(&raw_tile.data, labels);
+            return R::upload_layer(&line.verts, labels);
         }
 
         let layers = Layers{
@@ -1842,7 +1848,7 @@ pub mod pmtile {
 
     static mut TILE_NUM  : u64 = 0;
     pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile<GL> {
-        let mut line = Line::new();
+        let mut line = LineBuilder::new();
 
         let mut lv = Vector2::new(0.0, 0.0);
 
@@ -1879,13 +1885,13 @@ pub mod pmtile {
             gl::BindVertexArray(vao);
 
             gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-            gl::BufferData(gl::ARRAY_BUFFER, (line.verts.len() * std::mem::size_of::<super::LineVert>()) as _, line.verts.as_ptr().cast(), gl::STATIC_DRAW);
+            gl::BufferData(gl::ARRAY_BUFFER, (line.verts.len() * std::mem::size_of::<super::GlVert>()) as _, line.verts.as_ptr().cast(), gl::STATIC_DRAW);
 
-            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, 0 as *const _);
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, 0 as *const _);
             gl::EnableVertexAttribArray(0);
-            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
             gl::EnableVertexAttribArray(1);
-            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::LineVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
             gl::EnableVertexAttribArray(2);
 
             gl::BindBuffer(gl::ARRAY_BUFFER, 0);
@@ -2253,7 +2259,7 @@ pub mod pmtile {
 
         #[test]
         fn build_straight_line() {
-            let mut line = Line::new();
+            let mut line = LineBuilder::new();
 
             let v1 = Vector2::new(0.0, 0.0);
             let v2 = Vector2::new(0.0, 1.0);
