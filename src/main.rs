@@ -193,7 +193,7 @@ impl Drop for FontMap {
 fn load_font() -> FontMap {
     let freetype = freetype::Library::init().unwrap();
 
-    let font_path = if cfg!(unix) {
+    let font_path = if cfg!(macos) {
         "/home/delusional/Documents/neocomp/assets/Roboto-Light.ttf"
     } else {
         "/System/Library/Fonts/Optima.ttc"
@@ -726,6 +726,8 @@ fn main() {
             render_poly(&shader_program, None, &gl_trans, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0);
             render_poly(&shader_program, None, &gl_trans, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0);
             render_poly(&shader_program, None, &gl_trans, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0);
+
+            render_poly(&shader_program, None, &gl_trans, &tile.layers.points, &Color(1.0, 1.0, 1.0, 1.0), 0.0);
 
             {
                 let road_layers = [

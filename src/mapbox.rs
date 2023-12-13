@@ -545,6 +545,8 @@ pub struct RawTile {
     pub medium: LineGeom,
     pub minor: LineGeom,
 
+    pub points: PolyGeom,
+
     pub strings: Vec<String>,
 }
 
@@ -555,6 +557,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         "water",
         "landuse",
         "buildings",
+        "places",
     ];
 
     fn scan_for_layers<const COUNT: usize>(reader: &mut pbuf::Message, layer_names: [&str; COUNT]) -> pbuf::Result<[Option<pbuf::Message>; COUNT]> {
@@ -1094,6 +1097,54 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         })
     }
 
+    fn read_point_layer(reader: &mut pbuf::Message, tile: &mut RawTile) -> pbuf::Result<()> {
+        let geom = &mut tile.points;
+
+        while let Ok(field) = reader.next() {
+            match field {
+                pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                    reader.enter_message()?;
+                    while let Ok(field) = reader.next() {
+                        match field {
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
+                                let geo_type = reader.read_var_int()?;
+                                assert!(geo_type == 1);
+                            },
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
+                                let mut state = 0;
+                                let mut it = reader.read_packed_var_int()?;
+                                while let Some(cmd) = it.next() {
+                                    let cmd = cmd?;
+                                    if (cmd & 7) == 1 { // MoveTo
+                                        assert!(cmd >> 3 == 1);
+                                        assert!(state == 0);
+                                        state = 1;
+                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+
+                                        geom.start.push(LineStart{pos: geom.data.len()});
+                                        geom.data.push(LineVert { x:x-1.0, y:y-1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                        geom.data.push(LineVert { x:x+1.0, y:y-1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                        geom.data.push(LineVert { x:x+1.0, y:y+1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                        geom.data.push(LineVert { x:x-1.0, y:y+1.0, norm_x: 0.0, norm_y: 0.0, sign: 1 });
+                                    } else {
+                                        panic!("Unknown command");
+                                    }
+                                }
+                            }
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
+                            x => { reader.skip(x.wtype)?; },
+                        }
+                    }
+                }
+                x => { reader.skip(x.wtype)?; },
+            }
+        }
+
+        return Ok(());
+    }
+
     let mut layer_messages = scan_for_layers(reader, layer_names)?;
 
     let earth = if let Some(layer) = &mut layer_messages[1] {
@@ -1144,12 +1195,18 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         farmland,
         areas,
 
+        points: PolyGeom{ start: vec![], data: vec![] },
+
         strings: Vec::new(),
     };
 
     if let Some(layer) = &mut layer_messages[0] {
-        read_road_layer(layer, &mut tile)?
+        read_road_layer(layer, &mut tile)?;
     };
+
+    if let Some(layer) = &mut layer_messages[5] {
+        read_point_layer(layer, &mut tile)?;
+    }
 
     return Ok(tile);
 }
@@ -1376,6 +1433,8 @@ pub mod pmtile {
         pub water: Option<R::Layer>,
         pub farmland: Option<R::Layer>,
         pub areas: Option<R::Layer>,
+
+        pub points: Option<R::Layer>,
     }
 
     impl<R:Renderer> Default for Layers<R> {
@@ -1391,6 +1450,8 @@ pub mod pmtile {
                 water: None,
                 farmland: None,
                 areas: None,
+
+                points: None,
             }
         }
     }
@@ -1744,6 +1805,8 @@ pub mod pmtile {
             return R::upload_layer(&raw_tile.data, labels);
         }
 
+        dbg!(&raw_tile.points.data);
+
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
             roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, 4)),
@@ -1755,6 +1818,8 @@ pub mod pmtile {
             water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
             areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
+
+            points: Some(compile_polygon_layer::<R>(&mut raw_tile.points, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
