@@ -1,6 +1,6 @@
 use freetype::Face;
 
-use crate::math::Vector2;
+use crate::{math::Vector2, mapbox::GlVert};
 
 pub struct CharMetric {
     pub size: Vector2<f32>,

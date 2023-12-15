@@ -7,7 +7,7 @@ pub struct StubRenderer { }
 impl Renderer for StubRenderer {
     type Layer = ();
 
-    fn upload_layer(_data: &Vec<maps::mapbox::LineVert>, labels: Vec<maps::mapbox::pmtile::Label>) -> Self::Layer {
+    fn upload_layer(_data: &Vec<maps::mapbox::GlVert>, labels: Vec<maps::mapbox::pmtile::Label>) -> Self::Layer {
     }
 }
 

@@ -1209,6 +1209,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 }
 
 pub mod pmtile {
+    use crate::font::FontMetric;
     use crate::math::Vector2;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -1358,6 +1359,7 @@ pub mod pmtile {
         type Layer;
 
         fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Self::Layer;
+        fn upload_multi_layer(data: &Vec<crate::mapbox::GlVert>, sizes: Vec<RenderCommand>) -> Self::Layer;
     }
 
     pub struct GL { }
@@ -1401,7 +1403,33 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            return Layer{ vao, vbo, size: data.len(), labels };
+            return Layer{ vao, vbo, commands: vec![RenderCommand::Simple(data.len())], labels };
+        }
+
+        fn upload_multi_layer(data: &Vec<crate::mapbox::GlVert>, sizes: Vec<RenderCommand>) -> Self::Layer {
+            let mut vao = 0;
+            unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+            let mut vbo = 0;
+            unsafe { gl::GenBuffers(1, &mut vbo) };
+
+            unsafe {
+                gl::BindVertexArray(vao);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::GlVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
+
+                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, 0 as *const _);
+                gl::EnableVertexAttribArray(0);
+                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(1);
+                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+                gl::EnableVertexAttribArray(2);
+
+                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+                gl::BindVertexArray(0);
+            }
+            return Layer{ vao, vbo, commands: sizes, labels:Vec::new() };
         }
     }
 
@@ -1412,10 +1440,15 @@ pub mod pmtile {
         pub orientation: f64,
     }
 
+    pub enum RenderCommand {
+        Simple(usize),
+        PositionedLetter(char, Vector2<f32>, usize),
+    }
+
     pub struct Layer {
         pub vao: u32,
         pub vbo: u32,
-        pub size: usize,
+        pub commands: Vec<RenderCommand>,
         pub labels: Vec<Label>,
     }
 
@@ -1577,7 +1610,7 @@ pub mod pmtile {
         }
     }
 
-    fn compile_tile<R: Renderer>(x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
+    fn compile_tile<R: Renderer>(font: &FontMetric, x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
         let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
         fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
@@ -1702,14 +1735,47 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_point_layer<R: Renderer>(raw_tile: &Vec<Vector2<f32>>, _z: u8) -> R::Layer {
-            let mut tri_polys = Vec::new();
+        fn compile_point_layer<R: Renderer>(raw_tile: &Vec<Vector2<f32>>, font: &FontMetric, _z: u8) -> R::Layer {
+            let mut verts = Vec::new();
+            let mut sizes = Vec::new();
             for v in raw_tile {
-                tri_polys.push(super::GlVert { x:   v.x as f32 - 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                tri_polys.push(super::GlVert { x:   v.x as f32 - 10.0, y:   v.y as f32 + 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                tri_polys.push(super::GlVert { x:   v.x as f32 + 10.0, y:   v.y as f32 - 10.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                let mut pen = Vector2::new(0.0, 0.0);
+
+                let mut min = Vector2::new(-20.0, -20.0);
+                min += pen;
+                let mut max = Vector2::new(20.0, 20.0);
+                max += pen;
+
+
+                verts.push(super::GlVert { x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                verts.push(super::GlVert { x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
+                sizes.push(RenderCommand::PositionedLetter('z', *v, 6));
+
+                pen.x += 20.0;
+
+                for c in "Hello sailor".chars() {
+                    let (mut min, mut max) = font.size_str(&[c as u8]);
+                    let x = max.x;
+                    min += pen;
+                    max += pen;
+
+                    pen.x += x;
+
+                    verts.push(super::GlVert { x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                    verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                    verts.push(super::GlVert { x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
+
+                    sizes.push(RenderCommand::PositionedLetter(c, *v, 6));
+                }
             }
-            return R::upload_layer(&tri_polys, Vec::new());
+            return R::upload_multi_layer(&verts, sizes);
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
@@ -1831,7 +1897,7 @@ pub mod pmtile {
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
             areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
 
-            points: Some(compile_point_layer::<R>(&mut raw_tile.points, z)),
+            points: Some(compile_point_layer::<R>(&mut raw_tile.points, font, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -1899,7 +1965,7 @@ pub mod pmtile {
         }
 
         let layers = Layers{
-            roads: Some(Layer{ vao, vbo, size: line.verts.len(), labels: Vec::new() }),
+            roads: Some(Layer{ vao, vbo, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
             ..Default::default()
         };
 
@@ -2032,7 +2098,8 @@ pub mod pmtile {
 
     }
 
-    pub struct File<R: Renderer> {
+    pub struct File<'a, R: Renderer> {
+        font: &'a FontMetric,
         file: std::fs::File,
         root_offset: u64,
         root_len: usize,
@@ -2055,8 +2122,8 @@ pub mod pmtile {
         r: std::marker::PhantomData<R>,
     }
 
-    impl<R: Renderer> File<R> {
-        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
+    impl<'a, R: Renderer> File<'a, R> {
+        pub fn new<P: AsRef<std::path::Path>>(path: P, font: &'a FontMetric) -> Self {
             let mut file = std::fs::File::open(path).unwrap();
 
             let mut slice: BinarySlice = BinarySlice::from_read(&mut file, 0, 127);
@@ -2085,6 +2152,7 @@ pub mod pmtile {
             let max_zoom = slice.u8();
 
             return File {
+                font,
                 file,
                 root_offset,
                 root_len,
@@ -2174,7 +2242,7 @@ pub mod pmtile {
                         assert!(eoffset + (elen as u64) <= self.tile_len as u64);
 
                         let tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
-                        return Some(compile_tile(x, y, level, tile_slice).unwrap());
+                        return Some(compile_tile(self.font, x, y, level, tile_slice).unwrap());
                     },
                     DEntry::Leaf(eoffset, elen) => {
                         assert!(eoffset + (elen as u64) < self.leaf_len as u64);
@@ -2186,15 +2254,15 @@ pub mod pmtile {
         }
     }
 
-    pub struct LiveTiles {
-        pub source: File<GL>,
+    pub struct LiveTiles<'a> {
+        pub source: File<'a, GL>,
 
         pub active: HashMap<u64, Tile<GL>>,
         pub visible: Vec<u64>,
     }
 
-    impl LiveTiles {
-        pub fn new(source: File<GL>) -> Self {
+    impl<'a> LiveTiles<'a> {
+        pub fn new(source: File<'a, GL>) -> Self {
             return LiveTiles {
                 source,
                 active: HashMap::new(),

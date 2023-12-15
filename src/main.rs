@@ -160,6 +160,13 @@ pub struct LineProg {
     fill_color: i32,
 }
 
+pub struct FontProg {
+    program: u32,
+    texture: i32,
+    transform: i32,
+    target: i32,
+}
+
 struct TexInfo {
     bearing: Vector2<f32>,
     size: Vector2<f32>,
@@ -402,6 +409,46 @@ fn main() {
 
     let font = load_font();
 
+    const FONT_VERT_SHADER: &str = "
+        #version 330 core
+        layout(location = 0) in vec2 position;
+        layout(location = 1) in vec2 uv_in;
+
+        uniform mat4 transform;
+
+        out vec2 uv;
+
+        void main() {
+            vec4 gp = transform * vec4(position, 0.0, 1.0);
+            gl_Position = gp;
+            uv = uv_in;
+        }
+    ";
+
+    const FONT_FRAG_SHADER: &str = "
+        #version 330 core
+        out vec4 color;
+
+        in vec2 uv;
+
+        uniform sampler2D tex;
+        uniform bool target;
+
+        const float smoothing = 1.0/16.0;
+
+        void main() {
+            if(target) {
+                color = vec4(1-2*length(uv - vec2(0.5)));
+            } else {
+                float dist = texture(tex, uv).r;
+                float alpha = smoothstep(0.5 - smoothing, 0.5 + smoothing, dist);
+                color = vec4(alpha*1.0, alpha*1.0, alpha*1.0, alpha);
+            }
+        }
+    ";
+
+
+
     const VERT_SHADER: &str = "
         #version 330 core
         layout(location = 0) in vec2 position;
@@ -513,6 +560,21 @@ fn main() {
         }
     }
 
+    let font_shader = {
+        let program = compile_shader(FONT_VERT_SHADER, FONT_FRAG_SHADER);
+        let texture = CString::new("tex").unwrap();
+        let transform = CString::new("transform").unwrap();
+        let target = CString::new("target").unwrap();
+        unsafe {
+            FontProg {
+                program,
+                texture: gl::GetUniformLocation(program, texture.as_ptr()),
+                transform: gl::GetUniformLocation(program, transform.as_ptr()),
+                target: gl::GetUniformLocation(program, target.as_ptr()),
+            }
+        }
+    };
+
     let tris = triangulate::triangulate(
         [0].iter().copied(),
         [(100.0, 100.0), (100.0, 200.0), (200.0, 200.0), (200.0, 100.0)].iter().copied(),
@@ -561,7 +623,7 @@ fn main() {
     let mut viewport_pos = Vector2::new(0.0_f64, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
-    let mut tiles = mapbox::pmtile::LiveTiles::new(mapbox::pmtile::File::new("aalborg.pmtiles"));
+    let mut tiles = mapbox::pmtile::LiveTiles::new(mapbox::pmtile::File::new("aalborg.pmtiles", &font.metrics));
     while !window.should_close() {
         glfw.poll_events();
 
@@ -644,6 +706,8 @@ fn main() {
             let mut tile_trans = transform.clone();
             let tile = tiles.active.get(tid).unwrap();
 
+            let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32;
+
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
             let tile_trans = {
@@ -694,7 +758,7 @@ fn main() {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
-            fn render_poly(shader_program: &LineProg, projection32: Option<&GLTransform>, tile_transform32: &GLTransform, layer: &Option<mapbox::pmtile::Layer>, color: &Color, width: f32) {
+            fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform32: &Transform, layer: &Option<mapbox::pmtile::Layer>, color: &Color, width: f32, font: &FontMap, inverse_scale: f32) {
                 if let Some(layer) = layer {
                     unsafe {
                         gl::UseProgram(shader_program.program);
@@ -702,32 +766,69 @@ fn main() {
                         if let Some(projection32) = projection32 {
                             gl::UniformMatrix4fv(shader_program.pre_transform, 1, gl::TRUE, projection32.as_ptr());
                         }
-                        gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.as_ptr());
+                        gl::UniformMatrix4fv(shader_program.transform, 1, gl::TRUE, tile_transform32.to_gl().as_ptr());
                         gl::BindVertexArray(layer.vao);
 
                         gl::Uniform1f(shader_program.width, width);
                         let Color(r, g, b, a) = color;
                         gl::Uniform4f(shader_program.fill_color, *r, *g, *b, *a);
-                        gl::DrawArrays(gl::TRIANGLES, 0, layer.size as _);
+                        let mut offset = 0;
+                        let mut mode = 0;
+                        for cmd in &layer.commands {
+                            let x = match cmd {
+                                mapbox::pmtile::RenderCommand::Simple(x) => {
+                                    assert!(mode == 0);
+                                    x
+                                }
+                                mapbox::pmtile::RenderCommand::PositionedLetter(c, t, x) => {
+                                    if mode == 0 {
+                                        gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+                                        gl::Enable(gl::BLEND);
+
+                                        gl::ActiveTexture(gl::TEXTURE0);
+
+                                        gl::UseProgram(font_shader.program);
+                                        gl::Uniform1i(font_shader.texture, 0);
+
+                                        mode = 1;
+                                    }
+
+                                    let mut trans = tile_transform32.clone();
+                                    trans.translate(t);
+                                    trans.scale(&Vector2::new(inverse_scale, inverse_scale));
+
+                                    gl::UniformMatrix4fv(font_shader.transform, 1, gl::TRUE, trans.to_gl().as_ptr());
+
+                                    gl::Uniform1i(font_shader.target, (*c == 'z') as i32);
+
+                                    gl::BindTexture(gl::TEXTURE_2D, font.textures[*c as usize]);
+
+                                    x
+                                }
+                            };
+
+                            gl::DrawArrays(gl::TRIANGLES, offset as _, *x as _);
+                            offset += x;
+                        }
 
                         gl::BindVertexArray(0);
                     }
                 }
             }
 
-            let (gl_proj, gl_trans) = {
+            let gl_proj = {
                 let mut projection = projection.clone();
                 projection.scale(&Vector2::new(scale, scale));
-                (projection.to_gl(), tile_trans.to_gl())
+                projection.to_gl()
             };
 
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.earth, &Color(0.1, 0.3, 0.4, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.areas, &Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0);
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.earth, &Color(0.1, 0.3, 0.4, 1.0), 0.0, &font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.areas, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0, &font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0, &font, 0.0);
 
-            render_poly(&shader_program, None, &gl_trans, &tile.layers.points, &Color(1.0, 1.0, 1.0, 1.0), 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.points, &Color(1.0, 1.0, 1.0, 1.0), 0.0, &font, scale_factor*(1.0/scale as f32)*10.0 * 18000.0);
 
             {
                 let road_layers = [
@@ -740,11 +841,11 @@ fn main() {
 
                 for (layer, bgcolor, _, width)  in &road_layers {
                     let outline_width = 1.0/scale;
-                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &layer, bgcolor, *width + outline_width as f32);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, &layer, bgcolor, *width + outline_width as f32, &font, 0.0);
                 }
 
                 for (layer, _, fgcolor, width)  in &road_layers {
-                    render_poly(&shader_program, Some(&gl_proj), &gl_trans, &layer, fgcolor, *width);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, &layer, fgcolor, *width, &font, 0.0);
                 }
             }
 
@@ -767,7 +868,6 @@ fn main() {
                             let (mut min, mut max) = font.metrics.size_str(label.text.as_bytes());
 
                             let mut transform = Transform::identity();
-                            let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32;
                             transform.translate(&Vector2::new(max.x / 2.0 * scale_factor * lsize, -min.y * scale_factor * lsize));
                             transform.scale(&Vector2::new(scale_factor, scale_factor));
                             transform.scale(&Vector2::new(lsize, lsize));
@@ -835,9 +935,8 @@ fn main() {
                         trans.translate(&Vector2::new(-size.x / 2.0, -size.y/2.0));
                         trans.scale(&Vector2::new(size.x/border.extent as f32, size.y/border.extent as f32));
 
-                        let gl_trans = trans.to_gl();
                         let gl_proj = proj.to_gl();
-                        render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(1.0, 1.0, 1.0, 1.0), 1.0);
+                        render_poly(&shader_program, &font_shader, Some(&gl_proj), &trans, &border.layers.roads, &Color(1.0, 1.0, 1.0, 1.0), 1.0, &font, 0.0);
                     }
 
                     for (i, _label) in labels.iter().enumerate() {
@@ -852,9 +951,8 @@ fn main() {
                         // @HACK This is just because the border layer is a hack as well.
                         trans.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
 
-                        let gl_trans = trans.to_gl();
                         let gl_proj = projection.to_gl();
-                        render_poly(&shader_program, Some(&gl_proj), &gl_trans, &border.layers.roads, &Color(0.0, 1.0, 1.0, 1.0), 1.0);
+                        render_poly(&shader_program, &font_shader, Some(&gl_proj), &trans, &border.layers.roads, &Color(0.0, 1.0, 1.0, 1.0), 1.0, &font, 0.0);
                     }
                 }
 
