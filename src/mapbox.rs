@@ -506,6 +506,11 @@ pub struct GlVert {
     pub sign: i8,
 }
 
+pub struct PointGeom {
+    data: Vec<Vector2<f32>>,
+    name: Vec<Option<usize>>,
+}
+
 #[derive(Debug,Clone)]
 pub struct LineStart {
     pos: usize,
@@ -523,6 +528,15 @@ impl LineGeom {
             start: Vec::new(),
             name: Vec::new(),
             data: Vec::new(),
+        }
+    }
+}
+
+impl PointGeom {
+    pub fn new() -> Self {
+        return Self {
+            data: Vec::new(),
+            name: Vec::new(),
         }
     }
 }
@@ -546,7 +560,7 @@ pub struct RawTile {
     pub medium: LineGeom,
     pub minor: LineGeom,
 
-    pub points: Vec<Vector2<f32>>,
+    pub points: PointGeom,
 
     pub strings: Vec<String>,
 }
@@ -1100,16 +1114,41 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
     fn read_point_layer(reader: &mut pbuf::Message, tile: &mut RawTile) -> pbuf::Result<()> {
         let geom = &mut tile.points;
 
+        let name_key_id = {
+            let (key_ids, _) = scan_for_keys_and_values(
+                &mut reader.clone(),
+                &vec!["name"],
+                &vec![],
+            )?;
+
+            key_ids[0]
+        };
+
+        let mut name_reader = reader.clone();
+        let mut names = Vec::new();
+
         while let Ok(field) = reader.next() {
             match field {
                 pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
                 pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
                     reader.enter_message()?;
+                    let mut name_value = None;
                     while let Ok(field) = reader.next() {
                         match field {
                             pbuf::TypeAndTag{wtype: pbuf::WireType::VarInt, tag: 3} => {
                                 let geo_type = reader.read_var_int()?;
                                 assert!(geo_type == 1);
+                            },
+                            pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
+                                let mut it = reader.read_packed_var_int()?;
+                                while let Some(tag) = it.next() {
+                                    let key = tag?;
+                                    let value = it.next().unwrap()?;
+
+                                    if Some(key) == name_key_id {
+                                        name_value = Some(value);
+                                    }
+                                }
                             },
                             pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 4} => {
                                 let mut state = 0;
@@ -1123,7 +1162,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
 
-                                        geom.push(Vector2::new(x, y));
+                                        geom.data.push(Vector2::new(x, y));
                                     } else {
                                         panic!("Unknown command");
                                     }
@@ -1133,11 +1172,28 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                             x => { reader.skip(x.wtype)?; },
                         }
                     }
+
+                    if let Some(x) = name_value {
+                        names.push(x);
+                    }
+
                 }
                 x => { reader.skip(x.wtype)?; },
             }
         }
 
+        let mut index : Vec<usize> = (0..names.len()).collect();
+        index.sort_by_key(|x| names[*x]);
+        let (index, mut names) = lookup_values(&mut name_reader, &names, &index).unwrap();
+        let offset = tile.strings.len();
+
+        tile.strings.append(&mut names);
+
+        for i in 0..index.len() {
+            geom.name.push(Some(offset + index[i]));
+        }
+
+        assert!(geom.data.len() == geom.name.len());
         return Ok(());
     }
 
@@ -1192,7 +1248,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
         farmland,
         areas,
 
-        points: Vec::new(),
+        points: PointGeom::new(),
 
         strings: Vec::new(),
     };
@@ -1359,7 +1415,7 @@ pub mod pmtile {
         type Layer;
 
         fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Self::Layer;
-        fn upload_multi_layer(data: &Vec<crate::mapbox::GlVert>, sizes: Vec<RenderCommand>) -> Self::Layer;
+        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, labels: Vec<Label>) -> Self::Layer;
     }
 
     pub struct GL { }
@@ -1378,35 +1434,13 @@ pub mod pmtile {
     }
 
     impl Renderer for GL {
-        type Layer = Layer;
+        type Layer = GlLayer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Layer {
-            let mut vao = 0;
-            unsafe { gl::GenVertexArrays(1, &mut vao) };
-
-            let mut vbo = 0;
-            unsafe { gl::GenBuffers(1, &mut vbo) };
-
-            unsafe {
-                gl::BindVertexArray(vao);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::GlVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
-
-                gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, 0 as *const _);
-                gl::EnableVertexAttribArray(0);
-                gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(1);
-                gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
-                gl::EnableVertexAttribArray(2);
-
-                gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-                gl::BindVertexArray(0);
-            }
-            return Layer{ vao, vbo, commands: vec![RenderCommand::Simple(data.len())], labels };
+        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> GlLayer {
+            return Self::upload_multi_layer(data, vec![RenderCommand::Simple(data.len())], labels);
         }
 
-        fn upload_multi_layer(data: &Vec<crate::mapbox::GlVert>, sizes: Vec<RenderCommand>) -> Self::Layer {
+        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, labels: Vec<Label>) -> Self::Layer {
             let mut vao = 0;
             unsafe { gl::GenVertexArrays(1, &mut vao) };
 
@@ -1417,7 +1451,7 @@ pub mod pmtile {
                 gl::BindVertexArray(vao);
 
                 gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-                gl::BufferData(gl::ARRAY_BUFFER, (data.len() * std::mem::size_of::<super::GlVert>()) as _, data.as_ptr().cast(), gl::STATIC_DRAW);
+                gl::BufferData(gl::ARRAY_BUFFER, (vertex_data.len() * std::mem::size_of::<super::GlVert>()) as _, vertex_data.as_ptr().cast(), gl::STATIC_DRAW);
 
                 gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<super::GlVert>() as i32, 0 as *const _);
                 gl::EnableVertexAttribArray(0);
@@ -1429,7 +1463,7 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            return Layer{ vao, vbo, commands: sizes, labels:Vec::new() };
+            return GlLayer{ vao, vbo, commands: cmd, labels };
         }
     }
 
@@ -1442,10 +1476,11 @@ pub mod pmtile {
 
     pub enum RenderCommand {
         Simple(usize),
+        Target(Vector2<f32>, usize),
         PositionedLetter(char, Vector2<f32>, usize),
     }
 
-    pub struct Layer {
+    pub struct GlLayer {
         pub vao: u32,
         pub vbo: u32,
         pub commands: Vec<RenderCommand>,
@@ -1496,7 +1531,7 @@ pub mod pmtile {
         pub layers: Layers<R>,
     }
 
-    impl Drop for Layer {
+    impl Drop for GlLayer {
         fn drop(&mut self) {
             unsafe {
                 gl::DeleteVertexArrays(1, &self.vao);
@@ -1735,47 +1770,39 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_point_layer<R: Renderer>(raw_tile: &Vec<Vector2<f32>>, font: &FontMetric, _z: u8) -> R::Layer {
+        fn compile_point_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &FontMetric, _z: u8) -> R::Layer {
             let mut verts = Vec::new();
-            let mut sizes = Vec::new();
-            for v in raw_tile {
-                let mut pen = Vector2::new(0.0, 0.0);
+            let mut draw_commands = Vec::new();
+            for (i, v) in raw_tile.data.iter().enumerate() {
 
-                let mut min = Vector2::new(-20.0, -20.0);
-                min += pen;
-                let mut max = Vector2::new(20.0, 20.0);
-                max += pen;
+                verts.push(super::GlVert { x: -20.0, y: -20.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x: -20.0, y:  20.0, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                verts.push(super::GlVert { x:  20.0, y: -20.0, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x:  20.0, y: -20.0, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                verts.push(super::GlVert { x: -20.0, y:  20.0, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                verts.push(super::GlVert { x:  20.0, y:  20.0, norm_x: 1.0, norm_y: 1.0, sign: 0 });
+                draw_commands.push(RenderCommand::Target(*v, 6));
 
 
-                verts.push(super::GlVert { x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                verts.push(super::GlVert { x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
-                sizes.push(RenderCommand::PositionedLetter('z', *v, 6));
+                let mut pen = Vector2::new(20.0, 0.0);
+                for c in strings[raw_tile.name[i].unwrap()].chars() {
+                    // @CORRECTNESS @HACK: We can't do this since the size here is the glyph size,
+                    // but what we actually need is the texture size. We don't have the texture
+                    // size here.
+                    let (min, max) = font.size_str(&[c as u8]);
 
-                pen.x += 20.0;
+                    verts.push(super::GlVert { x: pen.x + min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: pen.x + min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                    verts.push(super::GlVert { x: pen.x + max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: pen.x + max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                    verts.push(super::GlVert { x: pen.x + min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                    verts.push(super::GlVert { x: pen.x + max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
+                    draw_commands.push(RenderCommand::PositionedLetter(c, *v, 6));
 
-                for c in "Hello sailor".chars() {
-                    let (mut min, mut max) = font.size_str(&[c as u8]);
-                    let x = max.x;
-                    min += pen;
-                    max += pen;
-
-                    pen.x += x;
-
-                    verts.push(super::GlVert { x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                    verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                    verts.push(super::GlVert { x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
-
-                    sizes.push(RenderCommand::PositionedLetter(c, *v, 6));
+                    pen.x += max.x;
                 }
             }
-            return R::upload_multi_layer(&verts, sizes);
+            return R::upload_multi_layer(&verts, draw_commands, vec![]);
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
@@ -1897,7 +1924,7 @@ pub mod pmtile {
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
             areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
 
-            points: Some(compile_point_layer::<R>(&mut raw_tile.points, font, z)),
+            points: Some(compile_point_layer::<R>(&mut raw_tile.points, &raw_tile.strings, font, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -1965,7 +1992,7 @@ pub mod pmtile {
         }
 
         let layers = Layers{
-            roads: Some(Layer{ vao, vbo, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
+            roads: Some(GlLayer{ vao, vbo, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
             ..Default::default()
         };
 

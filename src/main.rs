@@ -208,9 +208,9 @@ fn load_font() -> FontMap {
 
     let face = freetype.new_face(font_path, 0).unwrap();
     face.set_pixel_sizes(0, 32).unwrap();
-    let font = FontMetric::load(&face);
+    let font = FontMetric::load(face.clone());
 
-    let mut textures = vec![0; font.chars.len()];
+    let mut textures = vec![0; 128];
     unsafe{ gl::GenTextures(textures.len() as i32, textures.as_mut_ptr()) };
     for i in 0..textures.len() {
         unsafe{
@@ -224,7 +224,7 @@ fn load_font() -> FontMap {
 
     unsafe{ gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1) }
 
-    let mut texinfo = Vec::with_capacity(font.chars.len());
+    let mut texinfo = Vec::with_capacity(128);
     for i in 0..textures.len() {
         face.load_char(i, freetype::face::LoadFlag::RENDER).unwrap();
         let glyph = face.glyph();
@@ -345,7 +345,7 @@ fn draw_ascii(projection: Transform, font: &FontMap, text: &[u8]) {
     let mut pen = Vector2::new(0.0, 0.0);
     for c in text {
         if *c >= 128 { continue; }
-        let char = &font.metrics.chars[*c as usize];
+        let char = &font.metrics.size_char(*c as usize);
         let tchar = &font.texinfo[*c as usize];
 
         let mut pos = pen.clone();
@@ -758,7 +758,7 @@ fn main() {
                 gl::Clear(gl::COLOR_BUFFER_BIT);
             }
 
-            fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform32: &Transform, layer: &Option<mapbox::pmtile::Layer>, color: &Color, width: f32, font: &FontMap, inverse_scale: f32) {
+            fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform32: &Transform, layer: &Option<mapbox::pmtile::GlLayer>, color: &Color, width: f32, font: &FontMap, inverse_scale: f32) {
                 if let Some(layer) = layer {
                     unsafe {
                         gl::UseProgram(shader_program.program);
@@ -780,6 +780,31 @@ fn main() {
                                     assert!(mode == 0);
                                     x
                                 }
+                                // @CUTNPASTE: This is the same as the letter one below except we
+                                // set the _target_ uniform
+                                mapbox::pmtile::RenderCommand::Target(t, x) => {
+                                    if mode == 0 {
+                                        gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+                                        gl::Enable(gl::BLEND);
+
+                                        gl::ActiveTexture(gl::TEXTURE0);
+
+                                        gl::UseProgram(font_shader.program);
+                                        gl::Uniform1i(font_shader.texture, 0);
+
+                                        mode = 1;
+                                    }
+
+                                    let mut trans = tile_transform32.clone();
+                                    trans.translate(t);
+                                    trans.scale(&Vector2::new(inverse_scale, inverse_scale));
+
+                                    gl::UniformMatrix4fv(font_shader.transform, 1, gl::TRUE, trans.to_gl().as_ptr());
+
+                                    gl::Uniform1i(font_shader.target, 1);
+
+                                    x
+                                }
                                 mapbox::pmtile::RenderCommand::PositionedLetter(c, t, x) => {
                                     if mode == 0 {
                                         gl::BlendFunc(gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
@@ -799,9 +824,11 @@ fn main() {
 
                                     gl::UniformMatrix4fv(font_shader.transform, 1, gl::TRUE, trans.to_gl().as_ptr());
 
-                                    gl::Uniform1i(font_shader.target, (*c == 'z') as i32);
+                                    gl::Uniform1i(font_shader.target, 0);
 
-                                    gl::BindTexture(gl::TEXTURE_2D, font.textures[*c as usize]);
+                                    if (*c as u8) < 128 { 
+                                        gl::BindTexture(gl::TEXTURE_2D, font.textures[*c as usize]);
+                                    };
 
                                     x
                                 }
