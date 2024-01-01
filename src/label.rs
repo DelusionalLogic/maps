@@ -1,8 +1,8 @@
 use crate::math::Vector2;
 
 pub struct Box {
-    pub min: Vector2<f64>,
-    pub max: Vector2<f64>,
+    pub min: Vector2<f32>,
+    pub max: Vector2<f32>,
 }
 
 pub fn select_nooverlap(boxes: &Vec<Box>, to_draw: &mut Vec<usize>) {

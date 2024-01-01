@@ -138,8 +138,10 @@ impl <T> Vector2<T>
 impl <T> Vector2<T>
     where T: std::ops::Mul<Output = T> + std::ops::Add<Output = T> + Copy {
     pub fn apply_transform(&mut self, mat: &[T; 9]) {
-        self.x = mat[0] * self.x + mat[1] * self.y + mat[2];
-        self.y = mat[3] * self.x + mat[4] * self.y + mat[5];
+        let x = mat[0] * self.x + mat[1] * self.y + mat[2];
+        let y = mat[3] * self.x + mat[4] * self.y + mat[5];
+        self.x = x;
+        self.y = y;
     }
 }
 
@@ -298,3 +300,75 @@ impl Into<[f32; 9]> for &Mat3 {
         ];
     }
 }
+
+pub type GLTransform = [f32; 16];
+
+pub struct Transform {
+    mats : [Mat4; 2],
+    primary: bool,
+}
+
+impl Transform {
+    pub fn from_mat(source: Mat4) -> Self {
+        return Transform{
+            mats: [source, MAT4_IDENTITY],
+            primary: false,
+        };
+    }
+
+    pub fn identity() -> Self {
+        return Self::from_mat(MAT4_IDENTITY);
+    }
+
+    fn split(&self) -> (usize, usize) {
+        let primary = if self.primary { 1 } else { 0 };
+        let secondary = if self.primary { 0 } else { 1 };
+
+        return (primary, secondary);
+    }
+
+    fn apply(&mut self, op: &Mat4) {
+        let (primary, secondary) = self.split();
+
+        // self.mats[secondary] = op.mul(&self.mats[primary]);
+        self.mats[secondary] = self.mats[primary].mul(op);
+        self.primary = !self.primary;
+    }
+
+    pub fn translate<T: Into<f64> + Copy>(&mut self, offset: &Vector2<T>) {
+        self.apply(&Mat4::translate(offset.x.into(), offset.y.into()));
+    }
+
+    pub fn rotate<T: Into<f64>>(&mut self, theta: T) {
+        self.apply(&Mat4::rotate_2d(theta.into()));
+    }
+
+    pub fn scale<T: Into<f64> + Copy>(&mut self, scale: &Vector2<T>) {
+        self.apply(&Mat4::scale_2d(scale.x.into(), scale.y.into()));
+    }
+
+    pub fn mat(&self) -> &Mat4 {
+        let (primary, _) = self.split();
+        return &self.mats[primary];
+    }
+
+    pub fn to_gl(&self) -> GLTransform {
+        let (primary, _) = self.split();
+        return (&self.mats[primary]).into();
+    }
+}
+
+impl<'a> Into<&'a Mat4> for &'a Transform {
+    fn into(self) -> &'a Mat4 {
+        let (primary, _) = self.split();
+        return &self.mats[primary];
+    }
+}
+
+impl Clone for Transform {
+    fn clone(&self) -> Self {
+        let (primary, _) = self.split();
+        return Transform::from_mat(self.mats[primary].clone());
+    }
+}
+

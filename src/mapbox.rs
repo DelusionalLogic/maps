@@ -1266,6 +1266,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 
 pub mod pmtile {
     use crate::font::FontMetric;
+    use crate::math::Transform;
     use crate::math::Vector2;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -1470,8 +1471,13 @@ pub mod pmtile {
     pub struct Label {
         pub rank: u8,
         pub text: String,
+
         pub pos: Vector2<f64>,
         pub orientation: f64,
+
+        pub min: Vector2<f32>,
+        pub max: Vector2<f32>,
+        pub cmd: Vec<RenderCommand>,
     }
 
     pub enum RenderCommand {
@@ -1645,7 +1651,7 @@ pub mod pmtile {
         }
     }
 
-    fn compile_tile<R: Renderer>(font: &FontMetric, x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
+    fn compile_tile<R: Renderer>(font: &mut FontMetric, x: u64, y: u64, z: u8, reader: BinarySlice) -> Result<Tile<R>, String> {
         let mut raw_tile = super::read_one_linestring(&mut pbuf::Message::new(reader)).unwrap();
 
         fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
@@ -1770,7 +1776,7 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_point_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &FontMetric, _z: u8) -> R::Layer {
+        fn compile_point_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &mut FontMetric, _z: u8) -> R::Layer {
             let mut verts = Vec::new();
             let mut draw_commands = Vec::new();
             for (i, v) in raw_tile.data.iter().enumerate() {
@@ -1783,30 +1789,33 @@ pub mod pmtile {
                 verts.push(super::GlVert { x:  20.0, y:  20.0, norm_x: 1.0, norm_y: 1.0, sign: 0 });
                 draw_commands.push(RenderCommand::Target(*v, 6));
 
-
-                let mut pen = Vector2::new(20.0, 0.0);
-                for c in strings[raw_tile.name[i].unwrap()].chars() {
-                    // @CORRECTNESS @HACK: We can't do this since the size here is the glyph size,
-                    // but what we actually need is the texture size. We don't have the texture
-                    // size here.
-                    let (min, max) = font.size_str(&[c as u8]);
-
-                    verts.push(super::GlVert { x: pen.x + min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: pen.x + min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                    verts.push(super::GlVert { x: pen.x + max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: pen.x + max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                    verts.push(super::GlVert { x: pen.x + min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                    verts.push(super::GlVert { x: pen.x + max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0 });
-                    draw_commands.push(RenderCommand::PositionedLetter(c, *v, 6));
-
-                    pen.x += max.x;
-                }
+                let mut t = Transform::identity();
+                t.translate(&Vector2::new(20.0, 0.0));
+                font.layout_text(&mut verts, &mut draw_commands, &strings[raw_tile.name[i].unwrap()], &t, *v);
             }
             return R::upload_multi_layer(&verts, draw_commands, vec![]);
         }
 
-        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, z: u8) -> R::Layer {
+        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, rank: u8) -> R::Layer {
             let mut line = LineBuilder::new();
+
+            for i in 0..raw_tile.start.len() {
+                let start = raw_tile.start[i].pos;
+                let end = if i+1 < raw_tile.start.len() {
+                    raw_tile.start[i+1].pos
+                } else {
+                    raw_tile.data.len()
+                };
+
+                for j in 0..end-start-1 {
+                    let p1 = raw_tile.data[start + j];
+                    let p2 = raw_tile.data[start + j+1];
+
+                    line.add_point(p1, p2, i!=0, true);
+                }
+            }
+            let cmd = vec![RenderCommand::Simple(line.verts.len())];
+
             let mut labels = Vec::new();
             // Generate labels
             for i in 0..raw_tile.start.len() {
@@ -1843,7 +1852,7 @@ pub mod pmtile {
                 // calculate the start rank somehow, which I don't care to do right now.
                 let rank_steps = 4;
                 let mut next = len % distance_between_labels;
-                let mut rank = 0 + z as i16;
+                let mut rank = 0 + rank as i16;
                 let mut rank_direction = 1;
 
                 // Walk the line, placing labels as we go
@@ -1881,10 +1890,33 @@ pub mod pmtile {
                         pos *= next;
                         pos += v1;
 
+                        let mut cmd = vec![];
+
                         if let Some(text) = text {
+
+                            let width = font.width(&strings[text]);
+
+                            let mut t = Transform::identity();
+                            t.translate(&pos);
+                            t.rotate(orientation);
+                            t.scale(&Vector2::new(font_scale, font_scale));
+                            t.translate(&Vector2::new(-width/2.0, 0.0));
+
+                            let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, Vector2::new(0.0, 0.0));
+
+                            // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
+                            // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
+                            // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
+                            // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
+                            // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
+                            // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
+                            // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
+
                             labels.push(Label{
                                 rank: rank as u8,
+                                min, max,
                                 text: strings[text].clone(),
+                                cmd,
                                 pos,
                                 orientation,
                             });
@@ -1900,25 +1932,20 @@ pub mod pmtile {
 
                     next -= segment_len;
                 }
-
-                for j in 0..end-start-1 {
-                    let p1 = raw_tile.data[start + j];
-                    let p2 = raw_tile.data[start + j+1];
-
-                    line.add_point(p1, p2, i!=0, true);
-                }
             }
 
-            return R::upload_layer(&line.verts, labels);
+            return R::upload_multi_layer(&line.verts, cmd, labels);
         }
+
+        let font_size = 2.0_f32.powi(z as i32 - 15);
 
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, 4)),
-            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, 0)),
-            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, 1)),
-            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, 2)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, 3)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.5, 4)),
+            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*2.0, 0)),
+            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
+            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 3)),
             buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
             water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
@@ -2126,7 +2153,7 @@ pub mod pmtile {
     }
 
     pub struct File<'a, R: Renderer> {
-        font: &'a FontMetric,
+        pub font: &'a mut FontMetric,
         file: std::fs::File,
         root_offset: u64,
         root_len: usize,
@@ -2150,7 +2177,7 @@ pub mod pmtile {
     }
 
     impl<'a, R: Renderer> File<'a, R> {
-        pub fn new<P: AsRef<std::path::Path>>(path: P, font: &'a FontMetric) -> Self {
+        pub fn new<P: AsRef<std::path::Path>>(path: P, font: &'a mut FontMetric) -> Self {
             let mut file = std::fs::File::open(path).unwrap();
 
             let mut slice: BinarySlice = BinarySlice::from_read(&mut file, 0, 127);
