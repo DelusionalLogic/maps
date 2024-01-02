@@ -165,6 +165,10 @@ impl Vector2<f64> {
     pub fn angle(&mut self) -> f64 {
         return f64::atan2(self.y, self.x);
     }
+
+    pub fn downcast(self) -> Vector2<f32> {
+        return Vector2::new(self.x as _, self.y as _);
+    }
 }
 
 pub struct Mat4 {

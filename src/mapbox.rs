@@ -1132,6 +1132,7 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                 pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
                 pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
                     reader.enter_message()?;
+                    let mut skip = false;
                     let mut name_value = None;
                     while let Ok(field) = reader.next() {
                         match field {
@@ -1162,7 +1163,14 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                                         let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
                                         let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
 
-                                        geom.data.push(Vector2::new(x, y));
+                                        // Discard any point feature that doesn't lie directly in
+                                        // our tile. We don't want points in the overlap region.
+                                        // 4096 is the extent of the tile
+                                        if x >= 0.0 && x < 4096.0 && y >= 0.0 && y < 4096.0 {
+                                            geom.data.push(Vector2::new(x, y));
+                                        } else {
+                                            skip = true;
+                                        }
                                     } else {
                                         panic!("Unknown command");
                                     }
@@ -1173,8 +1181,10 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
                         }
                     }
 
-                    if let Some(x) = name_value {
-                        names.push(x);
+                    if !skip {
+                        if let Some(x) = name_value {
+                            names.push(x);
+                        }
                     }
 
                 }
@@ -1472,12 +1482,14 @@ pub mod pmtile {
         pub rank: u8,
         pub text: String,
 
-        pub pos: Vector2<f64>,
+        pub pos: Vector2<f32>,
         pub orientation: f64,
 
         pub min: Vector2<f32>,
         pub max: Vector2<f32>,
         pub cmd: Vec<RenderCommand>,
+
+        pub not_before: f32,
     }
 
     pub enum RenderCommand {
@@ -1776,24 +1788,41 @@ pub mod pmtile {
             return R::upload_layer(&tri_polys, Vec::new());
         }
 
-        fn compile_point_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &mut FontMetric, _z: u8) -> R::Layer {
+        fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, _z: u8) -> R::Layer {
             let mut verts = Vec::new();
-            let mut draw_commands = Vec::new();
+            let mut labels = Vec::new();
             for (i, v) in raw_tile.data.iter().enumerate() {
+                let mut draw_commands = Vec::new();
 
-                verts.push(super::GlVert { x: -20.0, y: -20.0, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x: -20.0, y:  20.0, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                verts.push(super::GlVert { x:  20.0, y: -20.0, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x:  20.0, y: -20.0, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-                verts.push(super::GlVert { x: -20.0, y:  20.0, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-                verts.push(super::GlVert { x:  20.0, y:  20.0, norm_x: 1.0, norm_y: 1.0, sign: 0 });
-                draw_commands.push(RenderCommand::Target(*v, 6));
+                let pos64 = Vector2::new(v.x as f64, v.y as _);
+
+                // const SIZE : f32 = 5.0;
+                // verts.push(super::GlVert { x: -SIZE, y: -SIZE, norm_x: 0.0, norm_y: 0.0, sign: 0 });
+                // verts.push(super::GlVert { x: -SIZE, y:  SIZE, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                // verts.push(super::GlVert { x:  SIZE, y: -SIZE, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                // verts.push(super::GlVert { x:  SIZE, y: -SIZE, norm_x: 1.0, norm_y: 0.0, sign: 0 });
+                // verts.push(super::GlVert { x: -SIZE, y:  SIZE, norm_x: 0.0, norm_y: 1.0, sign: 0 });
+                // verts.push(super::GlVert { x:  SIZE, y:  SIZE, norm_x: 1.0, norm_y: 1.0, sign: 0 });
+                // draw_commands.push(RenderCommand::Target(*v, 6));
+
+                let width = font.width(&strings[raw_tile.name[i].unwrap()]);
 
                 let mut t = Transform::identity();
-                t.translate(&Vector2::new(20.0, 0.0));
-                font.layout_text(&mut verts, &mut draw_commands, &strings[raw_tile.name[i].unwrap()], &t, *v);
+                t.scale(&Vector2::new(font_scale, font_scale));
+                t.translate(&Vector2::new(-width/2.0, 0.0));
+                // t.translate(&Vector2::new(SIZE, 0.0));
+                let (min, max) = font.layout_text(&mut verts, &mut draw_commands, &strings[raw_tile.name[i].unwrap()], &t, *v);
+                labels.push(Label{
+                    cmd: draw_commands,
+                    min, max,
+                    orientation: 0.0,
+                    rank: 0,
+                    text: "".to_string(),
+                    pos: *v,
+                    not_before: 0.0,
+                });
             }
-            return R::upload_multi_layer(&verts, draw_commands, vec![]);
+            return R::upload_multi_layer(&verts, vec![], labels);
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, rank: u8) -> R::Layer {
@@ -1897,12 +1926,15 @@ pub mod pmtile {
                             let width = font.width(&strings[text]);
 
                             let mut t = Transform::identity();
-                            t.translate(&pos);
                             t.rotate(orientation);
                             t.scale(&Vector2::new(font_scale, font_scale));
                             t.translate(&Vector2::new(-width/2.0, 0.0));
 
-                            let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, Vector2::new(0.0, 0.0));
+                            let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
+                            let height = (max.y - min.y) / font_scale;
+                            let mut p2 = pos.clone();
+                            p2 += Vector2::new(0.0, 50.0);
+                            font.layout_text(&mut line.verts, &mut cmd, &height.to_string(), &t, p2.downcast());
 
                             // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
                             // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
@@ -1912,13 +1944,15 @@ pub mod pmtile {
                             // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
                             // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
 
+                            let x: f64 = 2.0_f32.into();
                             labels.push(Label{
                                 rank: rank as u8,
                                 min, max,
                                 text: strings[text].clone(),
                                 cmd,
-                                pos,
+                                pos: pos.downcast(),
                                 orientation,
+                                not_before: 10000000.0/height,
                             });
                         }
 
@@ -1951,7 +1985,7 @@ pub mod pmtile {
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
             areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
 
-            points: Some(compile_point_layer::<R>(&mut raw_tile.points, &raw_tile.strings, font, z)),
+            points: Some(compile_region_layer::<R>(&mut raw_tile.points, &raw_tile.strings, font, font_size*4.0, z)),
         };
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -2152,8 +2186,8 @@ pub mod pmtile {
 
     }
 
-    pub struct File<'a, R: Renderer> {
-        pub font: &'a mut FontMetric,
+    pub struct File<R: Renderer> {
+        pub font: FontMetric,
         file: std::fs::File,
         root_offset: u64,
         root_len: usize,
@@ -2176,8 +2210,8 @@ pub mod pmtile {
         r: std::marker::PhantomData<R>,
     }
 
-    impl<'a, R: Renderer> File<'a, R> {
-        pub fn new<P: AsRef<std::path::Path>>(path: P, font: &'a mut FontMetric) -> Self {
+    impl<'a, R: Renderer> File<R> {
+        pub fn new<P: AsRef<std::path::Path>>(path: P, font: FontMetric) -> Self {
             let mut file = std::fs::File::open(path).unwrap();
 
             let mut slice: BinarySlice = BinarySlice::from_read(&mut file, 0, 127);
@@ -2296,7 +2330,7 @@ pub mod pmtile {
                         assert!(eoffset + (elen as u64) <= self.tile_len as u64);
 
                         let tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
-                        return Some(compile_tile(self.font, x, y, level, tile_slice).unwrap());
+                        return Some(compile_tile(&mut self.font, x, y, level, tile_slice).unwrap());
                     },
                     DEntry::Leaf(eoffset, elen) => {
                         assert!(eoffset + (elen as u64) < self.leaf_len as u64);
@@ -2308,15 +2342,15 @@ pub mod pmtile {
         }
     }
 
-    pub struct LiveTiles<'a> {
-        pub source: File<'a, GL>,
+    pub struct LiveTiles {
+        pub source: File<GL>,
 
         pub active: HashMap<u64, Tile<GL>>,
         pub visible: Vec<u64>,
     }
 
-    impl<'a> LiveTiles<'a> {
-        pub fn new(source: File<'a, GL>) -> Self {
+    impl<'a> LiveTiles {
+        pub fn new(source: File<GL>) -> Self {
             return LiveTiles {
                 source,
                 active: HashMap::new(),
@@ -2344,12 +2378,19 @@ pub mod pmtile {
                 self.active.remove(&k);
             }
 
-            self.visible.clear();
-            for x in left.max(0)..right.max(0) {
-                for y in top.max(0)..bottom.max(0) {
-                    let id = coords_to_id(x, y, level);
-                    if self.active.contains_key(&id) {
-                        self.visible.push(id);
+            if level == 0 {
+                // The coords_to_id function returns 0 for all tiles on level 0. The visbility
+                // calculation in the else branch therefore doesn't work for level 0. Just hardcode
+                // that result.
+                self.visible = vec![0];
+            } else {
+                self.visible.clear();
+                for x in left.max(0)..right.max(0) {
+                    for y in top.max(0)..bottom.max(0) {
+                        let id = coords_to_id(x, y, level);
+                        if self.active.contains_key(&id) {
+                            self.visible.push(id);
+                        }
                     }
                 }
             }
