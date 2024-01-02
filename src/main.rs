@@ -873,17 +873,17 @@ fn main() {
 
                 let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
 
+                // Discard labels that are too small
+                to_draw.retain(|i| {
+                    (labels[*i].not_before as f64) < scale
+                });
+
                 // Remove labels that overlap a tile boundary
                 to_draw.retain(|i| {
                     let bbox = &boxes[*i];
 
                     bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f32
                         && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f32
-                });
-
-                // Discard labels that are too small
-                to_draw.retain(|i| {
-                    (labels[*i].not_before as f64) < scale
                 });
 
                 to_draw.sort_by_key(|i| labels[*i].rank);

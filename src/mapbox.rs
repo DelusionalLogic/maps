@@ -1825,7 +1825,7 @@ pub mod pmtile {
             return R::upload_multi_layer(&verts, vec![], labels);
         }
 
-        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, rank: u8) -> R::Layer {
+        fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, rank_start: u8) -> R::Layer {
             let mut line = LineBuilder::new();
 
             for i in 0..raw_tile.start.len() {
@@ -1875,14 +1875,12 @@ pub mod pmtile {
 
                 len /= 2.0;
 
-                let distance_between_labels = 100.0;
-                // @COMPLETE: I just start the steps from the start of the line. Ideally, we'd want
-                // the center label to have rank 0 and then emit from there. That requires us to
-                // calculate the start rank somehow, which I don't care to do right now.
-                let rank_steps = 4;
-                let mut next = len % distance_between_labels;
-                let mut rank = 0 + rank as i16;
-                let mut rank_direction = 1;
+                const DISTANCE_BETWEEN_LABELS: f64 = 100.0;
+                let mut next = len % DISTANCE_BETWEEN_LABELS;
+
+                const RANK_SEQ: [u8; 8] = [0, 3, 2, 3, 1, 3, 2, 3];
+                const RANK_STEPS : usize = RANK_SEQ.len();
+                let mut rank_step = 0;
 
                 // Walk the line, placing labels as we go
                 for j in 0..end-start-1 {
@@ -1930,11 +1928,9 @@ pub mod pmtile {
                             t.scale(&Vector2::new(font_scale, font_scale));
                             t.translate(&Vector2::new(-width/2.0, 0.0));
 
+                            let rank = RANK_SEQ[rank_step] + rank_start;
+
                             let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
-                            let height = (max.y - min.y) / font_scale;
-                            let mut p2 = pos.clone();
-                            p2 += Vector2::new(0.0, 50.0);
-                            font.layout_text(&mut line.verts, &mut cmd, &height.to_string(), &t, p2.downcast());
 
                             // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
                             // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
@@ -1944,7 +1940,6 @@ pub mod pmtile {
                             // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
                             // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
 
-                            let x: f64 = 2.0_f32.into();
                             labels.push(Label{
                                 rank: rank as u8,
                                 min, max,
@@ -1952,16 +1947,14 @@ pub mod pmtile {
                                 cmd,
                                 pos: pos.downcast(),
                                 orientation,
-                                not_before: 10000000.0/height,
+                                // @HACK: These are just some random numbers
+                                not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
                             });
                         }
 
-                        rank += rank_direction;
-                        if rank >= rank_steps-1 || rank <= 0 {
-                            rank_direction = -rank_direction;
-                        }
+                        rank_step = (rank_step+1) % RANK_STEPS;
 
-                        next += distance_between_labels;
+                        next += DISTANCE_BETWEEN_LABELS;
                     }
 
                     next -= segment_len;
@@ -1975,11 +1968,11 @@ pub mod pmtile {
 
         let layers = Layers{
             earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.5, 4)),
+            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.25, 4)),
             highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*2.0, 0)),
             major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
             medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 3)),
+            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 2)),
             buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
             water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
             farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
