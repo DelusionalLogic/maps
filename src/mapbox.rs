@@ -1882,6 +1882,12 @@ pub mod pmtile {
                 const RANK_STEPS : usize = RANK_SEQ.len();
                 let mut rank_step = 0;
 
+                let text = raw_tile.name[i];
+                if text.is_none() {
+                    continue
+                }
+                let text = text.unwrap();
+
                 // Walk the line, placing labels as we go
                 for j in 0..end-start-1 {
                     let p1 = raw_tile.data[start + j];
@@ -1908,8 +1914,6 @@ pub mod pmtile {
                         orientation += std::f64::consts::TAU/2.0;
                     }
 
-                    let text = raw_tile.name[i];
-
                     while next <= segment_len {
                         assert!(next >= 0.0);
 
@@ -1919,38 +1923,50 @@ pub mod pmtile {
 
                         let mut cmd = vec![];
 
-                        if let Some(text) = text {
+                        let width = font.width(&strings[text]);
 
-                            let width = font.width(&strings[text]);
-
-                            let mut t = Transform::identity();
-                            t.rotate(orientation);
-                            t.scale(&Vector2::new(font_scale, font_scale));
-                            t.translate(&Vector2::new(-width/2.0, 0.0));
-
-                            let rank = RANK_SEQ[rank_step] + rank_start;
-
-                            let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
-
-                            // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
-                            // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
-                            // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
-                            // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
-                            // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
-                            // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
-                            // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
-
-                            labels.push(Label{
-                                rank: rank as u8,
-                                min, max,
-                                text: strings[text].clone(),
-                                cmd,
-                                pos: pos.downcast(),
-                                orientation,
-                                // @HACK: These are just some random numbers
-                                not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
-                            });
+                        // @FIX @UX This basically stops us from placing labels on bendy bits. We
+                        // might want to allow hanging off the end if the bend isn't very sharp.
+                        if next < (width*font_scale) as f64/2.0 {
+                            // If there's not enough space for the label, push it in so that there
+                            // is.
+                            next = (width*font_scale) as f64/2.0;
+                            continue;
+                        } else if segment_len - next < (width*font_scale) as f64/2.0 {
+                            // If there's not enough remaining space on the segment, push it into
+                            // the next segment (plus half the width of the string to make sure
+                            // there's room for it)
+                            next = segment_len + (width*font_scale) as f64/2.0;
+                            continue;
                         }
+
+                        let mut t = Transform::identity();
+                        t.rotate(orientation);
+                        t.scale(&Vector2::new(font_scale, font_scale));
+                        t.translate(&Vector2::new(-width/2.0, 0.0));
+
+                        let rank = RANK_SEQ[rank_step] + rank_start;
+
+                        let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
+
+                        // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
+                        // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
+                        // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
+                        // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
+                        // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
+                        // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
+                        // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
+
+                        labels.push(Label{
+                            rank: rank as u8,
+                            min, max,
+                            text: strings[text].clone(),
+                            cmd,
+                            pos: pos.downcast(),
+                            orientation,
+                            // @HACK: These are just some random numbers
+                            not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
+                        });
 
                         rank_step = (rank_step+1) % RANK_STEPS;
 
