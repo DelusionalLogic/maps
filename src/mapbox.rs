@@ -1480,7 +1480,6 @@ pub mod pmtile {
 
     pub struct Label {
         pub rank: u8,
-        pub text: String,
 
         pub pos: Vector2<f32>,
         pub orientation: f64,
@@ -1794,8 +1793,6 @@ pub mod pmtile {
             for (i, v) in raw_tile.data.iter().enumerate() {
                 let mut draw_commands = Vec::new();
 
-                let pos64 = Vector2::new(v.x as f64, v.y as _);
-
                 // const SIZE : f32 = 5.0;
                 // verts.push(super::GlVert { x: -SIZE, y: -SIZE, norm_x: 0.0, norm_y: 0.0, sign: 0 });
                 // verts.push(super::GlVert { x: -SIZE, y:  SIZE, norm_x: 0.0, norm_y: 1.0, sign: 0 });
@@ -1817,7 +1814,6 @@ pub mod pmtile {
                     min, max,
                     orientation: 0.0,
                     rank: 0,
-                    text: "".to_string(),
                     pos: *v,
                     not_before: 0.0,
                 });
@@ -1960,7 +1956,6 @@ pub mod pmtile {
                         labels.push(Label{
                             rank: rank as u8,
                             min, max,
-                            text: strings[text].clone(),
                             cmd,
                             pos: pos.downcast(),
                             orientation,
