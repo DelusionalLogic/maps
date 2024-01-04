@@ -581,7 +581,7 @@ fn main() {
             gl::UseProgram(shader_program.program);
         }
 
-        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &Vec<mapbox::pmtile::RenderCommand>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) {
+        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &[mapbox::pmtile::RenderCommand], color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) {
             unsafe {
                 gl::BindVertexArray(layer);
 
@@ -682,7 +682,7 @@ fn main() {
 
         fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform: &Transform, layer: &Option<mapbox::pmtile::GlLayer>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32) {
             if let Some(layer) = layer {
-                run_commands(shader_program, font_shader, projection32, tile_transform, layer.vao, &layer.commands, color, width, font, inverse_scale, 0);
+                run_commands(shader_program, font_shader, projection32, tile_transform, layer.vao, &layer.commands[0..layer.unlabeled], color, width, font, inverse_scale, 0);
             }
         }
 
@@ -763,7 +763,7 @@ fn main() {
 
                 for (layer, bgcolor, _, width)  in &road_layers {
                     let outline_width = 1.0/scale;
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, &layer, bgcolor, *width + outline_width as f32, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, layer, bgcolor, *width + outline_width as f32, &mut tiles.source.font, 0.0);
                 }
 
                 for (layer, _, fgcolor, width)  in &road_layers {
@@ -788,17 +788,20 @@ fn main() {
                 for (roads, zoom_scale) in road_layers {
                     if let Some(roads) = roads {
                         let mut offset = 0;
+                        let mut vao_offset = 0;
                         // @HACK @PERF Calculate the offset for the first conditional triangle.
                         // This shouldn't really be done here, we should remember this from when we
                         // rendered the unconditional stuff
-                        for cmd in &roads.commands {
+                        offset += roads.unlabeled;
+                        for cmd in &roads.commands[0..roads.unlabeled] {
                             let count = match cmd {
                                 mapbox::pmtile::RenderCommand::Simple(x) => x,
                                 mapbox::pmtile::RenderCommand::Target(_, x) => x,
                                 mapbox::pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
                             };
-                            offset += count;
+                            vao_offset += count;
                         }
+
 
                         for label in &roads.labels {
                             // @HACK we place it in the middle of the baseline, but the middle of
@@ -807,7 +810,7 @@ fn main() {
                             // necessarily the ending pen location). It might look better to use
                             // the middle of the bounding box in the x direction.
                             labels.push(label);
-                            draw_stuff.push((roads.vao, offset, zoom_scale));
+                            draw_stuff.push((roads, vao_offset, offset, zoom_scale));
 
                             let scale_factor = if zoom_scale {
                                 1.0/scale as f32 * 2.0_f32.powi(15)
@@ -826,13 +829,15 @@ fn main() {
                                 min, max
                             });
 
-                            for cmd in &label.cmd {
-                                offset += match cmd {
+                            for cmd in &roads.commands[offset..offset+label.cmds] {
+                                vao_offset += match cmd {
                                     mapbox::pmtile::RenderCommand::Simple(x) => x,
                                     mapbox::pmtile::RenderCommand::Target(_, x) => x,
                                     mapbox::pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
                                 }
                             }
+
+                            offset += label.cmds;
                         }
                     }
                 }
@@ -893,14 +898,14 @@ fn main() {
 
                 for i in to_draw {
                     let label = labels[i];
-                    let (vao, offset, zoom_scale) = draw_stuff[i];
+                    let (road, vao_offset, offset, zoom_scale) = draw_stuff[i];
                     let scale_factor = if zoom_scale {
                         1.0/scale as f32 * 2.0_f32.powi(15)
                     } else {
                         1.0
                     };
 
-                    run_commands(&shader_program, &font_shader, None, &tile_trans, vao, &label.cmd, &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.source.font, scale_factor, offset);
+                    run_commands(&shader_program, &font_shader, None, &tile_trans, road.vao, &road.commands[offset..offset+label.cmds], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.source.font, scale_factor, vao_offset);
                 }
             }
 

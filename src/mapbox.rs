@@ -1425,8 +1425,8 @@ pub mod pmtile {
     pub trait Renderer {
         type Layer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> Self::Layer;
-        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, labels: Vec<Label>) -> Self::Layer;
+        fn upload_layer(data: &Vec<crate::mapbox::GlVert>) -> Self::Layer;
+        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, unlabeled: usize, labels: Vec<Label>) -> Self::Layer;
     }
 
     pub struct GL { }
@@ -1447,11 +1447,11 @@ pub mod pmtile {
     impl Renderer for GL {
         type Layer = GlLayer;
 
-        fn upload_layer(data: &Vec<crate::mapbox::GlVert>, labels: Vec<Label>) -> GlLayer {
-            return Self::upload_multi_layer(data, vec![RenderCommand::Simple(data.len())], labels);
+        fn upload_layer(data: &Vec<crate::mapbox::GlVert>) -> GlLayer {
+            return Self::upload_multi_layer(data, vec![RenderCommand::Simple(data.len())], 1, Vec::new());
         }
 
-        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, labels: Vec<Label>) -> Self::Layer {
+        fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, unlabeled: usize, labels: Vec<Label>) -> Self::Layer {
             let mut vao = 0;
             unsafe { gl::GenVertexArrays(1, &mut vao) };
 
@@ -1474,7 +1474,7 @@ pub mod pmtile {
                 gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 gl::BindVertexArray(0);
             }
-            return GlLayer{ vao, vbo, commands: cmd, labels };
+            return GlLayer{ vao, vbo, unlabeled, commands: cmd, labels };
         }
     }
 
@@ -1485,7 +1485,8 @@ pub mod pmtile {
 
         pub min: Vector2<f32>,
         pub max: Vector2<f32>,
-        pub cmd: Vec<RenderCommand>,
+
+        pub cmds: usize,
 
         pub not_before: f32,
     }
@@ -1499,6 +1500,7 @@ pub mod pmtile {
     pub struct GlLayer {
         pub vao: u32,
         pub vbo: u32,
+        pub unlabeled: usize,
         pub commands: Vec<RenderCommand>,
         pub labels: Vec<Label>,
     }
@@ -1783,14 +1785,15 @@ pub mod pmtile {
                 offset += polys_end - polys_start;
             }
 
-            return R::upload_layer(&tri_polys, Vec::new());
+            return R::upload_layer(&tri_polys);
         }
 
         fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, _z: u8) -> R::Layer {
             let mut verts = Vec::new();
             let mut labels = Vec::new();
+            let mut draw_commands = Vec::new();
+            let mut size_before = 0;
             for (i, v) in raw_tile.data.iter().enumerate() {
-                let mut draw_commands = Vec::new();
 
                 // const SIZE : f32 = 5.0;
                 // verts.push(super::GlVert { x: -SIZE, y: -SIZE, norm_x: 0.0, norm_y: 0.0, sign: 0 });
@@ -1809,14 +1812,15 @@ pub mod pmtile {
                 // t.translate(&Vector2::new(SIZE, 0.0));
                 let (min, max) = font.layout_text(&mut verts, &mut draw_commands, &strings[raw_tile.name[i].unwrap()], &t, *v);
                 labels.push(Label{
-                    cmd: draw_commands,
+                    cmds: draw_commands.len() - size_before,
                     min, max,
                     rank: 0,
                     pos: *v,
                     not_before: 0.0,
                 });
+                size_before = draw_commands.len();
             }
-            return R::upload_multi_layer(&verts, vec![], labels);
+            return R::upload_multi_layer(&verts, draw_commands, 0, labels);
         }
 
         fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, rank_start: u8) -> R::Layer {
@@ -1837,7 +1841,7 @@ pub mod pmtile {
                     line.add_point(p1, p2, i!=0, true);
                 }
             }
-            let cmd = vec![RenderCommand::Simple(line.verts.len())];
+            let mut cmd = vec![RenderCommand::Simple(line.verts.len())];
 
             let mut labels = Vec::new();
             // Generate labels
@@ -1913,8 +1917,6 @@ pub mod pmtile {
                         pos *= next;
                         pos += v1;
 
-                        let mut cmd = vec![];
-
                         let width = font.width(&strings[text]);
 
                         // @FIX @UX This basically stops us from placing labels on bendy bits. We
@@ -1939,6 +1941,7 @@ pub mod pmtile {
 
                         let rank = RANK_SEQ[rank_step] + rank_start;
 
+                        let size_before = cmd.len();
                         let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
 
                         // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
@@ -1952,7 +1955,7 @@ pub mod pmtile {
                         labels.push(Label{
                             rank: rank as u8,
                             min, max,
-                            cmd,
+                            cmds: cmd.len() - size_before,
                             pos: pos.downcast(),
                             // @HACK: These are just some random numbers
                             not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
@@ -1967,7 +1970,7 @@ pub mod pmtile {
                 }
             }
 
-            return R::upload_multi_layer(&line.verts, cmd, labels);
+            return R::upload_multi_layer(&line.verts, cmd, 1, labels);
         }
 
         let font_size = 2.0_f32.powi(z as i32 - 15);
@@ -2052,7 +2055,7 @@ pub mod pmtile {
         }
 
         let layers = Layers{
-            roads: Some(GlLayer{ vao, vbo, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
+            roads: Some(GlLayer{ vao, vbo, unlabeled: 1, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
             ..Default::default()
         };
 
