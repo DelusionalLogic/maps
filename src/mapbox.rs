@@ -1482,7 +1482,6 @@ pub mod pmtile {
         pub rank: u8,
 
         pub pos: Vector2<f32>,
-        pub orientation: f64,
 
         pub min: Vector2<f32>,
         pub max: Vector2<f32>,
@@ -1812,7 +1811,6 @@ pub mod pmtile {
                 labels.push(Label{
                     cmd: draw_commands,
                     min, max,
-                    orientation: 0.0,
                     rank: 0,
                     pos: *v,
                     not_before: 0.0,
@@ -1904,10 +1902,8 @@ pub mod pmtile {
 
                     let mut orientation = v2.angle();
                     // Rotate the labels if they would be upside down
-                    if orientation > std::f64::consts::TAU/4.0 {
-                        orientation -= std::f64::consts::TAU/2.0;
-                    } else if orientation < -std::f64::consts::TAU/4.0 {
-                        orientation += std::f64::consts::TAU/2.0;
+                    if orientation.abs() > std::f64::consts::TAU/4.0 {
+                        orientation -= orientation.signum() * std::f64::consts::TAU/2.0;
                     }
 
                     while next <= segment_len {
@@ -1958,7 +1954,6 @@ pub mod pmtile {
                             min, max,
                             cmd,
                             pos: pos.downcast(),
-                            orientation,
                             // @HACK: These are just some random numbers
                             not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
                         });
