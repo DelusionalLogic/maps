@@ -1838,7 +1838,7 @@ pub mod pmtile {
                     let p1 = raw_tile.data[start + j];
                     let p2 = raw_tile.data[start + j+1];
 
-                    line.add_point(p1, p2, i!=0, true);
+                    line.add_point(p1, p2, j!=0, true);
                 }
             }
             let mut cmd = vec![RenderCommand::Simple(line.verts.len())];
