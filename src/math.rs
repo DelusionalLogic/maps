@@ -331,7 +331,7 @@ impl Transform {
         return (primary, secondary);
     }
 
-    fn apply(&mut self, op: &Mat4) {
+    pub fn apply(&mut self, op: &Mat4) {
         let (primary, secondary) = self.split();
 
         // self.mats[secondary] = op.mul(&self.mats[primary]);

@@ -563,10 +563,10 @@ fn main() {
         }
 
 
-        let mut transform = projection.clone();
+        let mut world_to_screen = projection.clone();
 
-        transform.scale(&Vector2::new(scale as f64, scale as f64));
-        transform.translate(&Vector2::new(-viewport_pos.x, -viewport_pos.y));
+        world_to_screen.scale(&Vector2::new(scale as f64, scale as f64));
+        world_to_screen.translate(&Vector2::new(-viewport_pos.x, -viewport_pos.y));
 
         clear_color(Color(0.0, 0.1, 0.15, 1.0));
 
@@ -686,23 +686,32 @@ fn main() {
             }
         }
 
+        let mut draw_stuff = Vec::new();
+        let mut labels = Vec::new();
+        let mut boxes = Vec::with_capacity(labels.len());
+
         for tid in &tiles.visible {
-            let mut tile_trans = transform.clone();
+            let mut tile_to_world = Transform::identity();
             let tile = tiles.active.get(tid).unwrap();
 
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
-            let tile_trans = {
+            let tile_to_world = {
                 let xcoord = tile.x as f64 * grid_step;
                 let ycoord = tile.y as f64 * grid_step;
                 // Transform the tilelocal coordinates to global coordinates
-                tile_trans.translate(&Vector2::new(xcoord, ycoord));
-                tile_trans.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
+                tile_to_world.translate(&Vector2::new(xcoord, ycoord));
+                tile_to_world.scale(&Vector2::new(grid_step/tile.extent as f64, grid_step/tile.extent as f64));
 
-                tile_trans
+                tile_to_world
             };
             // Here we can truncate
 
+            let tile_to_screen = {
+                let mut t = world_to_screen.clone();
+                t.apply(tile_to_world.mat());
+                t
+            };
 
             // Calculate the screen position of the tile and scissor that
             {
@@ -710,9 +719,10 @@ fn main() {
                 let mut v2 = Vector2::new(tile.extent as f32, 0.0);
 
                 // The clipspace transform
-                let mvp3d: &Mat4 = (&tile_trans).into();
+                let mvp3d: &Mat4 = (&tile_to_screen).into();
                 let mvp2d: Mat3 = mvp3d.into();
                 let mvp2d32: [f32; 9] = mvp2d.into();
+
                 v1.apply_transform(&mvp2d32);
                 v2.apply_transform(&mvp2d32);
 
@@ -746,11 +756,11 @@ fn main() {
                 projection.to_gl()
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.earth, &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.areas, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers.earth, &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers.areas, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers.farmland, &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers.buildings, &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers.water, &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut tiles.source.font, 0.0);
 
             {
                 let road_layers = [
@@ -763,11 +773,11 @@ fn main() {
 
                 for (layer, bgcolor, _, width)  in &road_layers {
                     let outline_width = 1.0/scale;
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, layer, bgcolor, *width + outline_width as f32, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, layer, bgcolor, *width + outline_width as f32, &mut tiles.source.font, 0.0);
                 }
 
                 for (layer, _, fgcolor, width)  in &road_layers {
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_trans, &layer, fgcolor, *width, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &layer, fgcolor, *width, &mut tiles.source.font, 0.0);
                 }
             }
 
@@ -781,11 +791,7 @@ fn main() {
                     (&tile.layers.highways, false),
                 ];
 
-                let mut draw_stuff = Vec::new();
-                let mut labels = Vec::new();
-                let mut boxes = Vec::with_capacity(labels.len());
-
-                for (roads, zoom_scale) in road_layers {
+                for (roads, screen_relative) in road_layers {
                     if let Some(roads) = roads {
                         let mut offset = 0;
                         let mut vao_offset = 0;
@@ -810,13 +816,18 @@ fn main() {
                             // necessarily the ending pen location). It might look better to use
                             // the middle of the bounding box in the x direction.
                             labels.push(label);
-                            draw_stuff.push((roads, vao_offset, offset, zoom_scale));
+                            draw_stuff.push((roads, vao_offset, offset, screen_relative, tile_to_screen.clone()));
 
-                            let scale_factor = if zoom_scale {
+                            let scale_factor = if screen_relative {
                                 1.0/scale as f32 * 2.0_f32.powi(15)
                             } else {
                                 1.0
                             };
+
+                            // The clipspace transform
+                            let mvp3d: &Mat4 = (&tile_to_world).into();
+                            let mvp2d: Mat3 = mvp3d.into();
+                            let mvp2d32: [f32; 9] = mvp2d.into();
 
                             let mut min = label.min;
                             let mut max = label.max;
@@ -824,6 +835,8 @@ fn main() {
                             max *= scale_factor;
                             min += label.pos;
                             max += label.pos;
+                            min.apply_transform(&mvp2d32);
+                            max.apply_transform(&mvp2d32);
 
                             boxes.push(label::Box {
                                 min, max
@@ -842,75 +855,8 @@ fn main() {
                     }
                 }
 
-
-                // For debugging label culling
-                if false {
-                    for (i, _label) in labels.iter().enumerate() {
-                        let bbox = &boxes[i];
-
-                        let mut trans = tile_trans.clone();
-                        let mut size = bbox.max.clone();
-                        size -= bbox.min;
-
-                        trans.translate(&bbox.min);
-
-                        // @HACK This is just because the border layer is a hack as well.
-                        trans.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
-
-                        let gl_proj = projection.to_gl();
-                        render_poly(&shader_program, &font_shader, Some(&gl_proj), &trans, &border.layers.roads, &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut tiles.source.font, 0.0);
-                    }
-
-                    for label in &labels {
-                        let mut size = label.max.clone();
-                        size -= label.min;
-                        size /= border.extent as f32;
-
-                        let mut trans = tile_trans.clone();
-                        trans.translate(&label.min);
-                        trans.translate(&label.pos);
-                        trans.scale(&size);
-
-                        let gl_proj = projection.to_gl();
-                        render_poly(&shader_program, &font_shader, Some(&gl_proj), &trans, &border.layers.roads, &Color(1.0, 0.0, 0.0, 1.0), 1.0, &mut tiles.source.font, 0.0);
-                    }
-                }
-
-                let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
-
-                // Discard labels that are too small
-                to_draw.retain(|i| {
-                    (labels[*i].not_before as f64) < scale
-                });
-
-                // Remove labels that overlap a tile boundary
-                to_draw.retain(|i| {
-                    let bbox = &boxes[*i];
-
-                    bbox.min.x >= 0.0 && bbox.max.x <= tile.extent as f32
-                        && bbox.min.y >= 0.0 && bbox.max.y <= tile.extent as f32
-                });
-
-                to_draw.sort_by_key(|i| labels[*i].rank);
-
-                // And select a set that doesn't overlap
-                label::select_nooverlap(&boxes, &mut to_draw);
-
-                for i in to_draw {
-                    let label = labels[i];
-                    let (road, vao_offset, offset, zoom_scale) = draw_stuff[i];
-                    let scale_factor = if zoom_scale {
-                        1.0/scale as f32 * 2.0_f32.powi(15)
-                    } else {
-                        1.0
-                    };
-
-                    run_commands(&shader_program, &font_shader, None, &tile_trans, road.vao, &road.commands[offset..offset+label.cmds], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.source.font, scale_factor, vao_offset);
-                }
             }
 
-            // We can't render anything after scissor since it'll be drawn over top by the next
-            // tile
             unsafe {
                 gl::Disable(gl::SCISSOR_TEST);
             }
@@ -925,9 +871,70 @@ fn main() {
             // }
         }
 
+        {
+            // For debugging label culling
+            if false {
+                for (i, _label) in labels.iter().enumerate() {
+                    let bbox = &boxes[i];
+
+                    let mut size = bbox.max.clone();
+                    size -= bbox.min;
+
+                    let mut entity_to_screen = world_to_screen.clone();
+                    entity_to_screen.translate(&bbox.min);
+
+                    // @HACK This is just because the border layer is a hack as well.
+                    entity_to_screen.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
+
+                    let gl_proj = projection.to_gl();
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers.roads, &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut tiles.source.font, 0.0);
+                }
+            }
+
+            let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
+
+            // Discard labels that are too small
+            to_draw.retain(|i| {
+                (labels[*i].not_before as f64) < scale
+            });
+
+            // Cull offscreen labels
+            {
+                let left = viewport_pos.x as f32;
+                let top = viewport_pos.y as f32;
+                let right = viewport_pos.x + (display.width as f64/scale as f64);
+                let bottom = viewport_pos.y + (display.height as f64/scale as f64);
+
+                to_draw.retain(|i| {
+                    let bbox = &boxes[*i];
+
+                    bbox.min.x <= right as f32 && bbox.max.x >= left as f32
+                        && bbox.min.y <= bottom as f32 && bbox.max.y >= top as f32
+                });
+            }
+
+            to_draw.sort_by_key(|i| labels[*i].rank);
+
+            // And select a set that doesn't overlap
+            label::select_nooverlap(&boxes, &mut to_draw);
+
+            for i in to_draw {
+                let label = labels[i];
+                let (road, vao_offset, offset, screenspace_scale, tile_to_screen) = &draw_stuff[i];
+                let scale_factor = if *screenspace_scale {
+                    1.0/scale as f32 * 2.0_f32.powi(15)
+                } else {
+                    1.0
+                };
+
+                run_commands(&shader_program, &font_shader, None, &tile_to_screen, road.vao, &road.commands[*offset..*offset+label.cmds], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.source.font, scale_factor, *vao_offset);
+            }
+        }
+
+        // Draw the pois
         for tid in &tiles.visible {
             let tile = tiles.active.get(tid).unwrap();
-            let mut tile_trans = transform.clone();
+            let mut tile_trans = world_to_screen.clone();
 
             let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32 * (1.0/scale as f32)*10.0 * 36000.0;
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
