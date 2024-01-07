@@ -1505,38 +1505,20 @@ pub mod pmtile {
         pub labels: Vec<Label>,
     }
 
-    pub struct Layers<R: Renderer> {
-        pub earth: Option<R::Layer>,
-        pub roads: Option<R::Layer>,
-        pub highways: Option<R::Layer>,
-        pub major: Option<R::Layer>,
-        pub medium: Option<R::Layer>,
-        pub minor: Option<R::Layer>,
-        pub buildings: Option<R::Layer>,
-        pub water: Option<R::Layer>,
-        pub farmland: Option<R::Layer>,
-        pub areas: Option<R::Layer>,
-
-        pub points: Option<R::Layer>,
-    }
-
-    impl<R:Renderer> Default for Layers<R> {
-        fn default() -> Self {
-            return Layers {
-                earth: None,
-                roads: None,
-                buildings: None,
-                highways: None,
-                major: None,
-                medium: None,
-                minor: None,
-                water: None,
-                farmland: None,
-                areas: None,
-
-                points: None,
-            }
-        }
+    pub const LAYERTYPE_MAX: usize = 11;
+    #[derive(Clone, Copy)]
+    pub enum LayerType {
+        EARTH,
+        ROADS,
+        HIGHWAYS,
+        MAJOR,
+        MEDIUM,
+        MINOR,
+        BUILDINGS,
+        WATER,
+        FARMLAND,
+        AREAS,
+        POINTS,
     }
 
     pub struct Tile<R: Renderer> {
@@ -1546,7 +1528,7 @@ pub mod pmtile {
         pub z: u8,
         pub extent: u16,
 
-        pub layers: Layers<R>,
+        pub layers: [Option<R::Layer>; LAYERTYPE_MAX],
     }
 
     impl Drop for GlLayer {
@@ -1975,20 +1957,20 @@ pub mod pmtile {
 
         let font_size = 2.0_f32.powi(z as i32 - 15);
 
-        let layers = Layers{
-            earth: Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
-            roads: Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.25, 4)),
-            highways: Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*2.0, 0)),
-            major: Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
-            medium: Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
-            minor: Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 2)),
-            buildings: Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
-            water: Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
-            farmland: Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
-            areas: Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
+        let layers = [
+            Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
+            Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.25, 4)),
+            Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*2.0, 0)),
+            Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
+            Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
+            Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 2)),
+            Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
+            Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
+            Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
+            Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
 
-            points: Some(compile_region_layer::<R>(&mut raw_tile.points, &raw_tile.strings, font, font_size*4.0, z)),
-        };
+            Some(compile_region_layer::<R>(&mut raw_tile.points, &raw_tile.strings, font, font_size*4.0, z)),
+        ];
 
         // @INCOMPLETE @CLEANUP: The extent here should be read from the file
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
@@ -2054,10 +2036,8 @@ pub mod pmtile {
             gl::BindVertexArray(0);
         }
 
-        let layers = Layers{
-            roads: Some(GlLayer{ vao, vbo, unlabeled: 1, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() }),
-            ..Default::default()
-        };
+        let mut layers: [Option<GlLayer>; 11] = Default::default();
+        layers[LayerType::ROADS as usize] = Some(GlLayer{ vao, vbo, unlabeled: 1, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() });
 
         let tid = unsafe { TILE_NUM +=1; TILE_NUM };
         return Tile{
@@ -2066,7 +2046,7 @@ pub mod pmtile {
             y,
             z,
             extent: 4096,
-            layers: layers.into(),
+            layers,
         };
     }
 

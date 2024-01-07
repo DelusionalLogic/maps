@@ -53,7 +53,7 @@ impl FontMetric {
     }
 
     pub fn size_char(&mut self, char: usize) -> CharMetric {
-        self.face.load_char(char, freetype::face::LoadFlag::RENDER).unwrap();
+        self.face.load_char(char, freetype::face::LoadFlag::DEFAULT).unwrap();
         let glyph = self.face.glyph();
         let metrics = glyph.metrics();
         let size = Vector2::new(metrics.width as f32 /64.0, metrics.height as f32 /64.0);
@@ -84,6 +84,11 @@ impl FontMetric {
             unsafe {
                 gl::GenTextures(1, textures.as_mut_ptr());
                 gl::BindTexture(gl::TEXTURE_2D, textures[0]);
+                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                 gl::TexStorage2D(
                     gl::TEXTURE_2D, 1,
                     gl::R8,
