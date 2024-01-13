@@ -1,11 +1,7 @@
 extern crate freetype;
 
-use maps::font::Atlas;
-use maps::font::LoadedTexture;
 use maps::font::FontMetric;
-use maps::font::TexInfo;
 use maps::mapbox;
-use maps::mapbox::pmtile::LAYERTYPE_MAX;
 use maps::mapbox::pmtile::LayerType;
 use maps::math::GLTransform;
 use maps::math::Transform;
@@ -25,6 +21,10 @@ use gl;
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
+
+fn lerp(v0: f32, v1: f32, t: f32) -> f32 {
+  return v0 + t * (v1 - v0);
+}
 
 fn compile_shader(vert: &str, frag: &str) -> u32 {
     let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
@@ -400,7 +400,7 @@ fn main() {
             viewport_pos.y += display.mouse_y * v;
         }
 
-        let scale_level = (f64::log2(scale).floor() as u64).min(tiles.source.max_zoom as u64);
+        let scale_level = zoom.floor() as u64;
 
         {
             // Calculate the mouse position in the world
@@ -428,6 +428,7 @@ fn main() {
         }
 
         {
+            let scale_level = scale_level.min(tiles.source.max_zoom as u64);
             let native_resolution = MAP_SIZE as f64 / 2.0_f64.powi(scale_level as i32);
             let left = ((viewport_pos.x / native_resolution).floor() as i64).max(0) as u64;
             let top = ((viewport_pos.y / native_resolution).floor() as i64).max(0) as u64;
@@ -573,6 +574,15 @@ fn main() {
         let mut commands = Vec::with_capacity(tiles.visible.len());
         let mut tile_to_screen_transforms = Vec::with_capacity(tiles.visible.len());
 
+        let inverse_scale = 1.0/scale as f32 * 2.0_f32.powi(15);
+        let text_zoom_scale = if zoom >= 14.0 {
+                        1.0
+                    } else if zoom >= 13.0 {
+                        lerp(3.0, 1.0, zoom - 13.0)
+                    } else {
+                        3.0
+                    };
+
         for (local_tid, tid) in tiles.visible.iter().enumerate() {
             let tile = tiles.active.get(tid).unwrap();
 
@@ -681,8 +691,6 @@ fn main() {
                 let mut tile_vaos = vec![0; overlay_layers.len()];
                 let mut tile_commands = Vec::with_capacity(overlay_layers.len());
 
-                let inverse_scale = 1.0/scale as f32 * 2.0_f32.powi(15);
-
                 for (layer_id, (layer, screen_relative)) in overlay_layers.into_iter().enumerate() {
                     if let Some(layer) = &tile.layers[layer as usize] {
                         tile_vaos[layer_id] = layer.vao;
@@ -707,8 +715,9 @@ fn main() {
                         let scale_factor = if screen_relative {
                             inverse_scale
                         } else {
-                            1.0
+                            text_zoom_scale
                         };
+
 
                         for label in &layer.labels {
                             // @HACK we place it in the middle of the baseline, but the middle of
@@ -820,9 +829,9 @@ fn main() {
                 let (local_tile_id, layer_id, screenspace_scale) = &draw_stuff[i];
 
                 let scale_factor = if *screenspace_scale {
-                    1.0/scale as f32 * 2.0_f32.powi(15)
+                    inverse_scale
                 } else {
-                    1.0
+                    text_zoom_scale
                 };
 
                 let commands = &mut commands[*local_tile_id][*layer_id];
