@@ -1,7 +1,7 @@
 extern crate freetype;
 
 use maps::font::FontMetric;
-use maps::mapbox;
+use maps::mapbox::pmtile;
 use maps::mapbox::pmtile::LayerType;
 use maps::math::GLTransform;
 use maps::math::Transform;
@@ -10,6 +10,8 @@ use maps::triangulate;
 use maps::label;
 use maps::math::Mat4;
 use maps::math::Mat3;
+use maps::world::TileStorage;
+use maps::world::World;
 
 use std::convert::TryInto;
 use std::ffi::CString;
@@ -110,7 +112,7 @@ fn load_font() -> FontMetric {
 
     let face = freetype.new_face(font_path, 0).unwrap();
     face.set_pixel_sizes(0, 32).unwrap();
-    let font = FontMetric::load(face.clone());
+    let font = FontMetric::load(face);
     return font;
 }
 
@@ -366,7 +368,7 @@ fn main() {
         }
     }
 
-    let border = mapbox::pmtile::placeholder_tile(0, 0, 0);
+    let border = pmtile::placeholder_tile(0, 0, 0);
 
     // -------------------------------------------
 
@@ -377,7 +379,7 @@ fn main() {
     let mut viewport_pos = Vector2::new(0.0_f64, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
-    let mut tiles = mapbox::pmtile::LiveTiles::new(mapbox::pmtile::File::new("aalborg.pmtiles", font));
+    let mut tiles = World::new(TileStorage::new("aalborg.pmtiles"), font);
     while !window.should_close() {
         glfw.poll_events();
 
@@ -457,7 +459,7 @@ fn main() {
             gl::UseProgram(shader_program.program);
         }
 
-        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &[mapbox::pmtile::RenderCommand], color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) -> usize {
+        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &[pmtile::RenderCommand], color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) -> usize {
             let mut cursor = offset;
 
             unsafe {
@@ -508,7 +510,7 @@ fn main() {
                 let mut mode = RenderMode::UNINIT;
                 for cmd in commands {
                     let x = match cmd {
-                        mapbox::pmtile::RenderCommand::Simple(x) => {
+                        pmtile::RenderCommand::Simple(x) => {
                             mode.set_mode(RenderMode::SIMPLE, shader_program, font_shader, projection, tile_transform, color, width);
                             if mode != RenderMode::SIMPLE {
 
@@ -517,7 +519,7 @@ fn main() {
 
                             x
                         }
-                        mapbox::pmtile::RenderCommand::Target(t, x) => {
+                        pmtile::RenderCommand::Target(t, x) => {
                             mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
@@ -530,7 +532,7 @@ fn main() {
 
                             x
                         }
-                        mapbox::pmtile::RenderCommand::PositionedLetter(c, t, x) => {
+                        pmtile::RenderCommand::PositionedLetter(c, t, x) => {
                             mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
@@ -558,7 +560,7 @@ fn main() {
             return cursor - offset;
         }
 
-        fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform: &Transform, layer: &Option<mapbox::pmtile::GlLayer>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32) {
+        fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform: &Transform, layer: &Option<pmtile::GlLayer>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32) {
             if let Some(layer) = layer {
                 run_commands(shader_program, font_shader, projection32, tile_transform, layer.vao, &layer.commands[0..layer.unlabeled], color, width, font, inverse_scale, 0);
             }
@@ -651,11 +653,11 @@ fn main() {
                 projection.to_gl()
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut tiles.source.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut tiles.source.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut tiles.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut tiles.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut tiles.font, 0.0);
 
             {
                 let road_layers = [
@@ -668,11 +670,11 @@ fn main() {
 
                 for (layer, bgcolor, _, width)  in &road_layers {
                     let outline_width = 1.0/scale;
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], bgcolor, *width + outline_width as f32, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], bgcolor, *width + outline_width as f32, &mut tiles.font, 0.0);
                 }
 
                 for (layer, _, fgcolor, width)  in &road_layers {
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], fgcolor, *width, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], fgcolor, *width, &mut tiles.font, 0.0);
                 }
             }
 
@@ -703,9 +705,9 @@ fn main() {
                         let mut vao_offset = 0;
                             for cmd in &layer.commands[0..layer.unlabeled] {
                                 let count = match cmd {
-                                    mapbox::pmtile::RenderCommand::Simple(x) => x,
-                                    mapbox::pmtile::RenderCommand::Target(_, x) => x,
-                                    mapbox::pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
+                                    pmtile::RenderCommand::Simple(x) => x,
+                                    pmtile::RenderCommand::Target(_, x) => x,
+                                    pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
                                 };
                                 vao_offset += count;
                             }
@@ -784,7 +786,7 @@ fn main() {
                     entity_to_screen.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
 
                     let gl_proj = projection.to_gl();
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut tiles.source.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut tiles.font, 0.0);
                 }
             }
 
@@ -849,7 +851,7 @@ fn main() {
                         *vao,
                         &commands[*offset..*offset+label.cmds],
                         &Color(1.0, 1.0, 1.0, 1.0), 0.0,
-                        &mut tiles.source.font,
+                        &mut tiles.font,
                         scale_factor,
                         *vao_offset
                     )
@@ -857,9 +859,9 @@ fn main() {
                     let mut executed = 0;
                     for cmd in &commands[*offset..*offset+label.cmds] {
                         executed += match cmd {
-                            mapbox::pmtile::RenderCommand::Simple(x) => x,
-                            mapbox::pmtile::RenderCommand::Target(_, x) => x,
-                            mapbox::pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
+                            pmtile::RenderCommand::Simple(x) => x,
+                            pmtile::RenderCommand::Target(_, x) => x,
+                            pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
                         }
                     }
 
@@ -889,7 +891,7 @@ fn main() {
                 tile_trans
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers[LayerType::POINTS as usize], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.source.font, scale_factor);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers[LayerType::POINTS as usize], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.font, scale_factor);
         }
 
         // let mut text_transform = projection.clone();

@@ -565,7 +565,7 @@ pub struct RawTile {
     pub strings: Vec<String>,
 }
 
-pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
+pub fn read_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
     let layer_names = [
         "roads",
         "earth",
@@ -1275,17 +1275,11 @@ pub fn read_one_linestring(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> 
 }
 
 pub mod pmtile {
-    use crate::font::FontMetric;
-    use crate::map::compile_tile;
-    use crate::math::Transform;
     use crate::math::Vector2;
-    use std::collections::HashMap;
-    use std::collections::HashSet;
     use std::io::Read;
     use std::io::Seek;
     use std::rc::Rc;
     use flate2::bufread::GzDecoder;
-    use super::pbuf;
     use core::ptr::NonNull;
 
     pub struct BinarySlice {
@@ -1633,7 +1627,6 @@ pub mod pmtile {
         }
     }
 
-    static mut TILE_NUM  : u64 = 0;
     pub fn placeholder_tile(x: u64, y: u64, z: u8) -> Tile<GL> {
         let mut line = LineBuilder::new();
 
@@ -1688,9 +1681,8 @@ pub mod pmtile {
         let mut layers: [Option<GlLayer>; 11] = Default::default();
         layers[LayerType::ROADS as usize] = Some(GlLayer{ vao, vbo, unlabeled: 1, commands: vec![RenderCommand::Simple(line.verts.len())], labels: Vec::new() });
 
-        let tid = unsafe { TILE_NUM +=1; TILE_NUM };
         return Tile{
-            tid,
+            tid: 0,
             x,
             y,
             z,
@@ -1710,12 +1702,12 @@ pub mod pmtile {
         len: Vec<usize>,
         offset: Vec<u64>,
 
-        next: Option<NonNull<Directory>>,
-        prev: Option<NonNull<Directory>>,
+        pub next: Option<NonNull<Directory>>,
+        pub prev: Option<NonNull<Directory>>,
     }
 
     impl Directory {
-        fn parse(slice: &mut BinarySlice) -> Self {
+        pub fn parse(slice: &mut BinarySlice) -> Self {
             fn read_varint(slice: &mut BinarySlice) -> u64 {
                 let mut value: u64 = 0;
 
@@ -1781,7 +1773,7 @@ pub mod pmtile {
             };
         }
 
-        fn find_entry(&self, id: u64) -> DEntry {
+        pub fn find_entry(&self, id: u64) -> DEntry {
             let index = match self.id.binary_search(&id) {
                 Ok(x) => x,
                 Err(x) => x-1,
@@ -1815,218 +1807,6 @@ pub mod pmtile {
             }
         }
 
-    }
-
-    pub struct File<R: Renderer> {
-        pub font: FontMetric,
-        file: std::fs::File,
-        root_offset: u64,
-        root_len: usize,
-
-        leaf_offset: u64,
-        leaf_len: usize,
-        tile_offset: u64,
-        tile_len: usize,
-
-        internal_compression: Compression,
-        tile_compression: Compression,
-
-        min_zoom: u8,
-        pub max_zoom: u8,
-
-        fdir: Option<NonNull<Directory>>,
-        ldir: Option<NonNull<Directory>>,
-        dcache: HashMap<u64, Directory>,
-
-        r: std::marker::PhantomData<R>,
-    }
-
-    impl<'a, R: Renderer> File<R> {
-        pub fn new<P: AsRef<std::path::Path>>(path: P, font: FontMetric) -> Self {
-            let mut file = std::fs::File::open(path).unwrap();
-
-            let mut slice: BinarySlice = BinarySlice::from_read(&mut file, 0, 127);
-            assert!(slice.u16() == 0x4d50); // Check for PM header
-            slice.skip(5);
-            assert!(slice.u8() == 3); // Version
-
-            let root_offset = slice.u64();
-            let root_len = slice.u64() as usize;
-
-            slice.skip(16);
-
-            let leaf_offset = slice.u64();
-            let leaf_len = slice.u64() as usize;
-            let tile_offset = slice.u64();
-            let tile_len = slice.u64() as usize;
-
-            slice.skip(25);
-
-            let internal_compression = slice.u8().into();
-            let tile_compression = slice.u8().into();
-
-            assert!(slice.u8() == 1); // Tile type (MVT)
-
-            let min_zoom = slice.u8();
-            let max_zoom = slice.u8();
-
-            return File {
-                font,
-                file,
-                root_offset,
-                root_len,
-                leaf_offset,
-                leaf_len,
-                tile_offset,
-                tile_len,
-                internal_compression,
-                tile_compression,
-                min_zoom,
-                max_zoom,
-
-                fdir: None,
-                ldir: None,
-                dcache: HashMap::new(),
-
-                r: std::marker::PhantomData,
-            };
-        }
-
-        fn read_directory(&mut self, offset: u64, len: usize) -> &Directory {
-            match self.dcache.entry(offset) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    let mut dir = e.into_mut();
-
-                    // Unlink the item
-                    if let Some(mut x) = dir.prev {
-                        // Not the first item, relink
-                        unsafe{x.as_mut().next = dir.next};
-                    } else {
-                        // The first item already
-                        return dir;
-                    }
-
-                    if let Some(mut x) = dir.next {
-                        // Not the last item, relink
-                        unsafe{x.as_mut().prev = dir.prev};
-                    } else {
-                        // We are the last item and must fixup the tail pointer
-                        self.ldir = dir.prev;
-                    }
-
-                    // Attach to the start
-                    if let Some(mut x) = self.fdir {
-                        dir.next = self.fdir;
-                        unsafe {x.as_mut().prev = Some(dir.into())};
-                    }
-                    self.fdir = Some(dir.into());
-
-                    return dir;
-                },
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    let mut slice = BinarySlice::from_read_decompress(&mut self.file, &self.internal_compression, offset, len);
-                    let dir = Directory::parse(&mut slice);
-
-                    let mut dir = e.insert(dir);
-
-                    // Attach the new directory to the start of the lru
-                    if let Some(mut x) = self.fdir {
-                        dir.next = self.fdir;
-                        unsafe {x.as_mut().prev = Some(dir.into())};
-                    }
-                    self.fdir = Some(dir.into());
-
-                    return dir;
-                },
-            };
-        }
-
-        pub fn load_tile(&mut self, x: u64, y: u64, level: u8) -> Option<Tile<R>> {
-            if level > self.max_zoom || level < self.min_zoom {
-                return None;
-            }
-
-            let tid = coords_to_id(x, y, level);
-
-            let mut offset = self.root_offset;
-            let mut len = self.root_len;
-            loop {
-                let dir = self.read_directory(offset, len);
-
-                match dir.find_entry(tid) {
-                    DEntry::Tile(pval, runlength, eoffset, elen) => {
-                        if pval + runlength <= tid {
-                            return None;
-                        }
-                        assert!(eoffset + (elen as u64) <= self.tile_len as u64);
-
-                        let tile_slice = BinarySlice::from_read_decompress(&mut self.file, &self.tile_compression, eoffset + self.tile_offset, elen);
-                        return Some(compile_tile(&mut self.font, x, y, level, tile_slice).unwrap());
-                    },
-                    DEntry::Leaf(eoffset, elen) => {
-                        assert!(eoffset + (elen as u64) < self.leaf_len as u64);
-                        offset = eoffset + self.leaf_offset;
-                        len = elen;
-                    },
-                }
-            }
-        }
-    }
-
-    pub struct LiveTiles {
-        pub source: File<GL>,
-
-        pub active: HashMap<u64, Tile<GL>>,
-        pub visible: Vec<u64>,
-    }
-
-    impl<'a> LiveTiles {
-        pub fn new(source: File<GL>) -> Self {
-            return LiveTiles {
-                source,
-                active: HashMap::new(),
-                visible: vec![],
-            };
-        }
-
-        pub fn retrieve_visible_tiles(&mut self, left: u64, top: u64, right: u64, bottom: u64, level: u8) {
-            let mut keys: HashSet<u64> = self.active.keys().cloned().collect();
-
-            for x in left.max(0)..right.max(0) {
-                for y in top.max(0)..bottom.max(0) {
-                    let id = coords_to_id(x, y, level);
-                    keys.remove(&id);
-                    if !self.active.contains_key(&id) {
-                        if let Some(ptile) = self.source.load_tile(x, y, level) {
-                            self.active.insert(id, ptile);
-                        }
-                    }
-
-                }
-            }
-
-            for k in keys {
-                self.active.remove(&k);
-            }
-
-            if level == 0 {
-                // The coords_to_id function returns 0 for all tiles on level 0. The visbility
-                // calculation in the else branch therefore doesn't work for level 0. Just hardcode
-                // that result.
-                self.visible = vec![0];
-            } else {
-                self.visible.clear();
-                for x in left.max(0)..right.max(0) {
-                    for y in top.max(0)..bottom.max(0) {
-                        let id = coords_to_id(x, y, level);
-                        if self.active.contains_key(&id) {
-                            self.visible.push(id);
-                        }
-                    }
-                }
-            }
-
-        }
     }
 
     #[cfg(test)]
