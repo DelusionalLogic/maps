@@ -1,13 +1,201 @@
 use crate::font::FontMetric;
 use crate::mapbox::GlVert;
 use crate::mapbox::RawTile;
-use crate::mapbox::pmtile::Label;
-use crate::mapbox::pmtile::LineBuilder;
-use crate::mapbox::pmtile::RenderCommand;
 use crate::math::Transform;
 use crate::math::Vector2;
-use crate::mapbox::pmtile::Tile;
-use crate::mapbox::pmtile::Renderer;
+use crate::triangulate;
+
+pub struct Label {
+    pub rank: u8,
+
+    pub pos: Vector2<f32>,
+
+    pub min: Vector2<f32>,
+    pub max: Vector2<f32>,
+
+    pub cmds: usize,
+
+    pub not_before: f32,
+}
+
+pub enum RenderCommand {
+    Simple(usize),
+    Target(Vector2<f32>, usize),
+    PositionedLetter(char, Vector2<f32>, usize),
+}
+
+pub struct GlLayer {
+    pub vao: u32,
+    pub vbo: u32,
+    pub unlabeled: usize,
+    pub commands: Vec<RenderCommand>,
+    pub blocks: Vec<usize>,
+    pub labels: Vec<Label>,
+}
+
+impl Drop for GlLayer {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteVertexArrays(1, &self.vao);
+            gl::DeleteBuffers(1, &self.vbo);
+        }
+    }
+}
+
+pub trait Renderer {
+    type Layer;
+
+    fn upload_layer(data: &Vec<crate::mapbox::GlVert>) -> Self::Layer;
+    fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, unlabeled: usize, labels: Vec<Label>) -> Self::Layer;
+}
+
+pub struct GL { }
+
+impl Renderer for GL {
+    type Layer = GlLayer;
+
+    fn upload_layer(data: &Vec<crate::mapbox::GlVert>) -> GlLayer {
+        return Self::upload_multi_layer(data, vec![RenderCommand::Simple(data.len())], 1, Vec::new());
+    }
+
+    fn upload_multi_layer(vertex_data: &Vec<crate::mapbox::GlVert>, cmd: Vec<RenderCommand>, unlabeled: usize, labels: Vec<Label>) -> Self::Layer {
+        let mut vao = 0;
+        let mut vbo = 0;
+
+        unsafe {
+            gl::GenVertexArrays(1, &mut vao);
+            gl::GenBuffers(1, &mut vbo);
+
+            gl::BindVertexArray(vao);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, (vertex_data.len() * std::mem::size_of::<GlVert>()) as _, vertex_data.as_ptr().cast(), gl::STATIC_DRAW);
+
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<GlVert>() as i32, 0 as *const _);
+            gl::EnableVertexAttribArray(0);
+            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(1);
+            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(2);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl::BindVertexArray(0);
+        }
+
+        let mut blocks = Vec::with_capacity(labels.len() + 1);
+        blocks.push(unlabeled);
+        for l in &labels {
+            blocks.push(l.cmds);
+        }
+
+        return GlLayer{
+            vao,
+            vbo,
+            unlabeled,
+            commands: cmd,
+            blocks,
+            labels
+        };
+    }
+}
+
+pub const LAYERTYPE_MAX: usize = 11;
+#[derive(Clone, Copy)]
+pub enum LayerType {
+    EARTH,
+    ROADS,
+    HIGHWAYS,
+    MAJOR,
+    MEDIUM,
+    MINOR,
+    BUILDINGS,
+    WATER,
+    FARMLAND,
+    AREAS,
+    POINTS,
+}
+
+pub struct Tile<R: Renderer> {
+    pub tid: u64,
+    pub x: u64,
+    pub y: u64,
+    pub z: u8,
+    pub extent: u16,
+
+    pub layers: [Option<R::Layer>; LAYERTYPE_MAX],
+}
+
+pub struct LineBuilder {
+    pub verts: Vec<GlVert>,
+}
+
+impl <'a> LineBuilder {
+    pub fn new() -> Self {
+        return LineBuilder{
+            verts: Vec::new(),
+        };
+    }
+
+    pub fn add_point(&mut self, lv: Vector2<f32>, v1: Vector2<f32>, connect_previous: bool) {
+        let cx = lv.x;
+        let cy = lv.y;
+
+        let mut ltov = v1.clone();
+        ltov -= lv;
+
+        let mut normal = ltov.clone();
+        normal.normal();
+        normal.unit();
+
+        let bend_norm_x;
+        let bend_norm_y;
+
+        if connect_previous {
+            let len = self.verts.len();
+
+            let last_normx = self.verts[len-2].norm_x;
+            let last_normy = self.verts[len-2].norm_y;
+
+            let mut join_x = last_normx + normal.x;
+            let mut join_y = last_normy + normal.y;
+            let join_len = f32::sqrt(f32::powi(join_x, 2) + f32::powi(join_y, 2));
+            join_x /= join_len;
+            join_y /= join_len;
+
+            let cos_angle = normal.x * join_x + normal.y * join_y;
+            let l = 1.0 / cos_angle;
+            // Don't do a miter for very sharp corners
+            if l < 2.0 {
+                bend_norm_x = join_x * l;
+                bend_norm_y = join_y * l;
+
+                self.verts[len-4].norm_x = bend_norm_x;
+                self.verts[len-4].norm_y = bend_norm_y;
+                self.verts[len-3].norm_x = -bend_norm_x;
+                self.verts[len-3].norm_y = -bend_norm_y;
+                self.verts[len-2].norm_x = bend_norm_x;
+                self.verts[len-2].norm_y = bend_norm_y;
+            } else {
+                // @HACK @COMPLETE: Do another type  of join here. Right now it's just disconnected
+                bend_norm_x = normal.x;
+                bend_norm_y = normal.y;
+            }
+        } else {
+            bend_norm_x = normal.x;
+            bend_norm_y = normal.y;
+        }
+
+        // Now construct the tris
+        self.verts.push(GlVert { x:   cx, y:   cy, norm_x:  bend_norm_x, norm_y:  bend_norm_y, sign: 1 });
+        self.verts.push(GlVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+        self.verts.push(GlVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+
+        self.verts.push(GlVert { x: v1.x, y: v1.y, norm_x: -normal.x, norm_y: -normal.y, sign: -1 });
+        self.verts.push(GlVert { x: v1.x, y: v1.y, norm_x:  normal.x, norm_y:  normal.y, sign: 1 });
+        self.verts.push(GlVert { x:   cx, y:   cy, norm_x: -bend_norm_x, norm_y: -bend_norm_y, sign: -1 });
+    }
+}
+
 
 fn polygon_area_two(polys: &[crate::mapbox::GlVert]) -> f32 {
     let start = 0;
@@ -22,13 +210,10 @@ fn polygon_area_two(polys: &[crate::mapbox::GlVert]) -> f32 {
     return area;
 }
 
-fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
+fn compile_polygon_layer<R: Renderer>(raw_tile: &crate::mapbox::PolyGeom, _z: u8) -> R::Layer {
     let poly_start = &raw_tile.start;
-    let polys = &mut raw_tile.data;
-    let mut tri_polys : Vec<GlVert> = vec![];
-
-    // Triangulate poly
-    use crate::triangulate;
+    let polys = &raw_tile.data;
+    let mut tri_polys = Vec::new();
 
     // @HACK: This normal calculation is bad and halfbaked. I'm leaving it in for now, but
     // the first sign of problems and i'm gutting it.
@@ -82,7 +267,7 @@ fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z
     }
     assert!(normals.len() == polys.len());
 
-    let mut multipoly_start = Vec::with_capacity(poly_start.len());
+    let mut exterior_rings = Vec::with_capacity(poly_start.len());
     // Find the clockwise polygons
     if !poly_start.is_empty() {
         for i in 0..poly_start.len() {
@@ -95,24 +280,25 @@ fn compile_polygon_layer<R: Renderer>(raw_tile: &mut crate::mapbox::PolyGeom, _z
 
             let area = polygon_area_two(&polys[start..end]);
             if area.is_sign_positive() {
-                multipoly_start.push(i);
+                exterior_rings.push(i);
             }
 
-            polys[start..end].reverse();
-            normals[start..end].reverse();
+            // I don't entirely understand why we don't need to reverse the clockwise polys here,
+            // but the output _looks_ fine.
         }
     }
 
     let mut offset = 0;
-    for i in 0..multipoly_start.len() {
-        let multipoly = multipoly_start[i];
-        let polys_start = poly_start[multipoly].pos;
+    for i in 0..exterior_rings.len() {
+        let ring = exterior_rings[i];
+        let polys_start = poly_start[ring].pos;
 
-        let polys_end = if i == multipoly_start.len()-1 {
-            // The final multipoly extends to the end of the polys array
-            polys.len()
+        let polys_end = if i < exterior_rings.len()-1 {
+            // Everything between here and the next exterior polygon is part of this polygon
+            poly_start[exterior_rings[i+1]].pos
         } else {
-            poly_start[multipoly_start[i+1]].pos
+            // The final one contains the rest of the polys
+            polys.len()
         };
 
         let point_it = polys[polys_start..polys_end].iter()
@@ -148,17 +334,8 @@ fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, string
     let mut verts = Vec::new();
     let mut labels = Vec::new();
     let mut draw_commands = Vec::new();
-    let mut size_before = 0;
     for (i, v) in raw_tile.data.iter().enumerate() {
-
-        // const SIZE : f32 = 5.0;
-        // verts.push(super::GlVert { x: -SIZE, y: -SIZE, norm_x: 0.0, norm_y: 0.0, sign: 0 });
-        // verts.push(super::GlVert { x: -SIZE, y:  SIZE, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-        // verts.push(super::GlVert { x:  SIZE, y: -SIZE, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-        // verts.push(super::GlVert { x:  SIZE, y: -SIZE, norm_x: 1.0, norm_y: 0.0, sign: 0 });
-        // verts.push(super::GlVert { x: -SIZE, y:  SIZE, norm_x: 0.0, norm_y: 1.0, sign: 0 });
-        // verts.push(super::GlVert { x:  SIZE, y:  SIZE, norm_x: 1.0, norm_y: 1.0, sign: 0 });
-        // draw_commands.push(RenderCommand::Target(*v, 6));
+        let size_before = draw_commands.len();
 
         let width = font.width(&strings[raw_tile.name[i].unwrap()]);
 
@@ -174,7 +351,6 @@ fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, string
             pos: *v,
             not_before: 0.0,
         });
-        size_before = draw_commands.len();
     }
     return R::upload_multi_layer(&verts, draw_commands, 0, labels);
 }
@@ -194,7 +370,7 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
             let p1 = raw_tile.data[start + j];
             let p2 = raw_tile.data[start + j+1];
 
-            line.add_point(p1, p2, j!=0, true);
+            line.add_point(p1, p2, j!=0);
         }
     }
     let mut cmd = vec![RenderCommand::Simple(line.verts.len())];
@@ -233,14 +409,13 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
         let mut next = len % DISTANCE_BETWEEN_LABELS;
 
         const RANK_SEQ: [u8; 8] = [0, 3, 2, 3, 1, 3, 2, 3];
-        const RANK_STEPS : usize = RANK_SEQ.len();
         let mut rank_step = 0;
 
         let text = raw_tile.name[i];
         if text.is_none() {
             continue
         }
-        let text = text.unwrap();
+        let text = &strings[text.unwrap()];
 
         // Walk the line, placing labels as we go
         for j in 0..end-start-1 {
@@ -273,7 +448,7 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
                 pos *= next;
                 pos += v1;
 
-                let width = font.width(&strings[text]);
+                let width = font.width(text);
 
                 // @FIX @UX This basically stops us from placing labels on bendy bits. We
                 // might want to allow hanging off the end if the bend isn't very sharp.
@@ -298,15 +473,7 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
                 let rank = RANK_SEQ[rank_step] + rank_start;
 
                 let size_before = cmd.len();
-                let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &strings[text], &t, pos.downcast());
-
-                // line.verts.push(super::GlVert{x: min.x, y: min.y, norm_x: 0.0, norm_y: 0.0, sign: 0});
-                // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
-                // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
-                // line.verts.push(super::GlVert{x: max.x, y: min.y, norm_x: 1.0, norm_y: 0.0, sign: 0});
-                // line.verts.push(super::GlVert{x: min.x, y: max.y, norm_x: 0.0, norm_y: 1.0, sign: 0});
-                // line.verts.push(super::GlVert{x: max.x, y: max.y, norm_x: 1.0, norm_y: 1.0, sign: 0});
-                // cmd.push(RenderCommand::PositionedLetter('x', Vector2::new(0.0, 0.0), 6));
+                let (min, max) = font.layout_text(&mut line.verts, &mut cmd, text, &t, pos.downcast());
 
                 labels.push(Label{
                     rank: rank as u8,
@@ -317,7 +484,7 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
                     not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
                 });
 
-                rank_step = (rank_step+1) % RANK_STEPS;
+                rank_step = (rank_step+1) % RANK_SEQ.len();
 
                 next += DISTANCE_BETWEEN_LABELS;
             }
@@ -329,20 +496,20 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
     return R::upload_multi_layer(&line.verts, cmd, 1, labels);
 }
 
-pub fn compile_tile<R: Renderer>(id: u64, font: &mut FontMetric, x: u64, y: u64, z: u8, mut raw_tile: RawTile) -> Result<Tile<R>, String> {
+pub fn compile_tile<R: Renderer>(id: u64, font: &mut FontMetric, x: u64, y: u64, z: u8, raw_tile: RawTile) -> Result<Tile<R>, String> {
     let font_size = 2.0_f32.powi(z as i32 - 15);
 
     let layers = [
-        Some(compile_polygon_layer::<R>(&mut raw_tile.earth, z)),
+        Some(compile_polygon_layer::<R>(&raw_tile.earth, z)),
         Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.25, 4)),
         Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*4.0, 0)),
         Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
         Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
         Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 2)),
-        Some(compile_polygon_layer::<R>(&mut raw_tile.buildings, z)),
-        Some(compile_polygon_layer::<R>(&mut raw_tile.water, z)),
-        Some(compile_polygon_layer::<R>(&mut raw_tile.farmland, z)),
-        Some(compile_polygon_layer::<R>(&mut raw_tile.areas, z)),
+        Some(compile_polygon_layer::<R>(&raw_tile.buildings, z)),
+        Some(compile_polygon_layer::<R>(&raw_tile.water, z)),
+        Some(compile_polygon_layer::<R>(&raw_tile.farmland, z)),
+        Some(compile_polygon_layer::<R>(&raw_tile.areas, z)),
 
         Some(compile_region_layer::<R>(&raw_tile.points, &raw_tile.strings, font, font_size*4.0, z)),
     ];

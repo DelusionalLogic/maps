@@ -1,16 +1,21 @@
 extern crate freetype;
 
 use maps::font::FontMetric;
-use maps::mapbox::pmtile;
-use maps::mapbox::pmtile::LayerType;
+use maps::map::GL;
+use maps::map::LayerType;
+use maps::map::LineBuilder;
+use maps::map::Tile;
+use maps::mapbox::GlVert;
 use maps::math::GLTransform;
 use maps::math::Transform;
 use maps::math::Vector2;
+use maps::map::GlLayer;
+use maps::map::RenderCommand;
+use maps::pmtile::PMTile;
 use maps::triangulate;
 use maps::label;
 use maps::math::Mat4;
 use maps::math::Mat3;
-use maps::world::TileStorage;
 use maps::world::World;
 
 use std::convert::TryInto;
@@ -368,9 +373,86 @@ fn main() {
         }
     }
 
-    let border = pmtile::placeholder_tile(0, 0, 0);
+    let border: Tile<GL> = {
+        let mut line = LineBuilder::new();
+
+        let mut lv = Vector2::new(0.0, 0.0);
+
+        {
+            let nv = Vector2::new(0.0, 4096.0);
+            line.add_point(lv, nv, false);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(4096.0, 4096.0);
+            line.add_point(lv, nv, true);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(4096.0, 0.0);
+            line.add_point(lv, nv, true);
+            lv = nv;
+        }
+
+        {
+            let nv = Vector2::new(0.0, 0.0);
+            line.add_point(lv, nv, true);
+        }
+
+        let mut vao = 0;
+        unsafe { gl::GenVertexArrays(1, &mut vao) };
+
+        let mut vbo = 0;
+        unsafe { gl::GenBuffers(1, &mut vbo) };
+
+        unsafe {
+            gl::BindVertexArray(vao);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, (line.verts.len() * std::mem::size_of::<GlVert>()) as _, line.verts.as_ptr().cast(), gl::STATIC_DRAW);
+
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<GlVert>() as i32, 0 as *const _);
+            gl::EnableVertexAttribArray(0);
+            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, std::mem::size_of::<GlVert>() as i32, (2 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(1);
+            gl::VertexAttribPointer(2, 1, gl::BYTE, gl::FALSE, std::mem::size_of::<GlVert>() as i32, (4 * std::mem::size_of::<f32>()) as *const _);
+            gl::EnableVertexAttribArray(2);
+
+            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl::BindVertexArray(0);
+        }
+
+        let mut layers: [Option<GlLayer>; 11] = Default::default();
+        layers[LayerType::ROADS as usize] = Some(GlLayer{
+            vao,
+            vbo,
+            unlabeled: 1,
+            commands: vec![RenderCommand::Simple(line.verts.len())],
+            blocks: vec![1],
+            labels: Vec::new(),
+        });
+
+        Tile{
+            tid: 0,
+            x: 0, y: 0, z: 0,
+            extent: 4096,
+            layers,
+        }
+    };
 
     // -------------------------------------------
+
+
+    let overlay_layers = [
+        (LayerType::POINTS, true),
+        (LayerType::ROADS, false),
+        (LayerType::MINOR, false),
+        (LayerType::MEDIUM, false),
+        (LayerType::MAJOR, false),
+        (LayerType::HIGHWAYS, false),
+    ];
 
     let mut projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
     let mut hold: Option<Vector2<f64>> = None;
@@ -379,7 +461,7 @@ fn main() {
     let mut viewport_pos = Vector2::new(0.0_f64, 0.0);
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
-    let mut tiles = World::new(TileStorage::new("aalborg.pmtiles"), font);
+    let mut tiles = World::new(PMTile::new("aalborg.pmtiles"), font);
     while !window.should_close() {
         glfw.poll_events();
 
@@ -459,7 +541,7 @@ fn main() {
             gl::UseProgram(shader_program.program);
         }
 
-        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &[pmtile::RenderCommand], color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) -> usize {
+        fn run_commands(shader_program: &LineProg, font_shader: &FontProg, projection: Option<&GLTransform>, tile_transform: &Transform, layer: u32, commands: &[RenderCommand], color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32, offset: usize) -> usize {
             let mut cursor = offset;
 
             unsafe {
@@ -510,7 +592,7 @@ fn main() {
                 let mut mode = RenderMode::UNINIT;
                 for cmd in commands {
                     let x = match cmd {
-                        pmtile::RenderCommand::Simple(x) => {
+                        RenderCommand::Simple(x) => {
                             mode.set_mode(RenderMode::SIMPLE, shader_program, font_shader, projection, tile_transform, color, width);
                             if mode != RenderMode::SIMPLE {
 
@@ -519,7 +601,7 @@ fn main() {
 
                             x
                         }
-                        pmtile::RenderCommand::Target(t, x) => {
+                        RenderCommand::Target(t, x) => {
                             mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
@@ -532,7 +614,7 @@ fn main() {
 
                             x
                         }
-                        pmtile::RenderCommand::PositionedLetter(c, t, x) => {
+                        RenderCommand::PositionedLetter(c, t, x) => {
                             mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
@@ -560,9 +642,9 @@ fn main() {
             return cursor - offset;
         }
 
-        fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform: &Transform, layer: &Option<pmtile::GlLayer>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32) {
+        fn render_poly(shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform: &Transform, layer: &Option<GlLayer>, color: &Color, width: f32, font: &mut FontMetric, inverse_scale: f32) {
             if let Some(layer) = layer {
-                run_commands(shader_program, font_shader, projection32, tile_transform, layer.vao, &layer.commands[0..layer.unlabeled], color, width, font, inverse_scale, 0);
+                run_commands(shader_program, font_shader, projection32, tile_transform, layer.vao, &layer.commands[0..layer.blocks[0]], color, width, font, inverse_scale, 0);
             }
         }
 
@@ -679,35 +761,27 @@ fn main() {
             }
 
             {
-                let overlay_layers = [
-                    (LayerType::POINTS, true),
-                    (LayerType::ROADS, false),
-                    (LayerType::MINOR, false),
-                    (LayerType::MEDIUM, false),
-                    (LayerType::MAJOR, false),
-                    (LayerType::HIGHWAYS, false),
-                ];
 
                 let mut tile_vao_offsets = vec![0; overlay_layers.len()];
                 let mut tile_offsets = vec![0; overlay_layers.len()];
                 let mut tile_vaos = vec![0; overlay_layers.len()];
                 let mut tile_commands = Vec::with_capacity(overlay_layers.len());
 
-                for (layer_id, (layer, screen_relative)) in overlay_layers.into_iter().enumerate() {
-                    if let Some(layer) = &tile.layers[layer as usize] {
+                for (layer_id, (layer_type, screen_relative)) in overlay_layers.into_iter().enumerate() {
+                    if let Some(layer) = &tile.layers[layer_type as usize] {
                         tile_vaos[layer_id] = layer.vao;
                         tile_commands.push(&layer.commands);
-                        tile_offsets[layer_id] = layer.unlabeled;
+                        tile_offsets[layer_id] = layer.blocks[0];
                         // @HACK @PERF Calculate the offset for the first conditional triangle.
                         // This shouldn't really be done here, we should remember this from when we
                         // rendered the unconditional stuff
                         tile_vao_offsets[layer_id] = {
                         let mut vao_offset = 0;
-                            for cmd in &layer.commands[0..layer.unlabeled] {
+                            for cmd in &layer.commands[0..layer.blocks[0]] {
                                 let count = match cmd {
-                                    pmtile::RenderCommand::Simple(x) => x,
-                                    pmtile::RenderCommand::Target(_, x) => x,
-                                    pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
+                                    RenderCommand::Simple(x) => x,
+                                    RenderCommand::Target(_, x) => x,
+                                    RenderCommand::PositionedLetter(_, _, x) => x,
                                 };
                                 vao_offset += count;
                             }
@@ -719,7 +793,6 @@ fn main() {
                         } else {
                             text_zoom_scale
                         };
-
 
                         for label in &layer.labels {
                             // @HACK we place it in the middle of the baseline, but the middle of
@@ -793,9 +866,9 @@ fn main() {
             let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
 
             // Discard labels that are too small
-            // to_draw.retain(|i| {
-            //     (labels[*i].not_before as f64) < scale
-            // });
+            to_draw.retain(|i| {
+                (labels[*i].not_before as f64) < scale
+            });
 
             // Cull offscreen labels
             {
@@ -859,9 +932,9 @@ fn main() {
                     let mut executed = 0;
                     for cmd in &commands[*offset..*offset+label.cmds] {
                         executed += match cmd {
-                            pmtile::RenderCommand::Simple(x) => x,
-                            pmtile::RenderCommand::Target(_, x) => x,
-                            pmtile::RenderCommand::PositionedLetter(_, _, x) => x,
+                            RenderCommand::Simple(x) => x,
+                            RenderCommand::Target(_, x) => x,
+                            RenderCommand::PositionedLetter(_, _, x) => x,
                         }
                     }
 

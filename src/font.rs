@@ -2,7 +2,9 @@ use std::{rc::Rc, collections::HashMap};
 
 use freetype::Face;
 
-use crate::{math::{Vector2, Transform, Mat3}, mapbox::{pmtile::RenderCommand, GlVert}};
+use crate::math::{Vector2, Transform, Mat3};
+use crate::mapbox::GlVert;
+use crate::map::RenderCommand;
 
 pub struct Atlas {
     pub gl_texture: u32,
