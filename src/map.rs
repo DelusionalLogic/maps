@@ -16,6 +16,8 @@ pub struct Label {
     pub cmds: usize,
 
     pub not_before: f32,
+    pub opacity: f32,
+    pub opacity_from: Option<usize>,
 }
 
 pub enum RenderCommand {
@@ -115,12 +117,25 @@ pub enum LayerType {
     POINTS,
 }
 
+pub struct FaderSlot {
+    pub key: String,
+}
+
+impl FaderSlot {
+    pub fn new(key: String) -> Self {
+        return FaderSlot {
+            key,
+        }
+    }
+}
+
 pub struct Tile<R: Renderer> {
     pub tid: u64,
     pub x: u64,
     pub y: u64,
     pub z: u8,
     pub extent: u16,
+    pub fades: Vec<FaderSlot>,
 
     pub layers: [Option<R::Layer>; LAYERTYPE_MAX],
 }
@@ -330,7 +345,34 @@ fn compile_polygon_layer<R: Renderer>(raw_tile: &crate::mapbox::PolyGeom, _z: u8
     return R::upload_layer(&tri_polys);
 }
 
-fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, font: &mut FontMetric, font_scale: f32, _z: u8) -> R::Layer {
+fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, strings: &Vec<String>, fades: &mut Vec<FaderSlot>, font: &mut FontMetric, font_scale: f32, _z: u8) -> R::Layer {
+
+    assert!(raw_tile.name.iter().all(|x| x.is_some()));
+
+    // Allocate unique fade handles for each unique point in the layer. The specification disallows
+    // the strings table from containing values that are byte for byte identical, we can therefore
+    // be sure that any points with the same name will have the same string id, and we can skip the
+    // string lookup.
+    let allocated_fades = {
+        let mut index: Vec<usize> = (0..raw_tile.name.len()).collect();
+        index.sort_by_key(|x| raw_tile.name[*x]);
+
+        let mut allocated_fades = vec![0; raw_tile.name.len()];
+        let mut current = None;
+        for i in index {
+            if current != Some(raw_tile.name[i]) {
+                fades.push(FaderSlot::new(strings[raw_tile.name[i].unwrap()].clone()));
+                current = Some(raw_tile.name[i]);
+            }
+
+            allocated_fades[i] = fades.len()-1;
+        }
+        allocated_fades
+    };
+
+    let mut t = Transform::identity();
+    t.scale(&Vector2::new(font_scale, font_scale));
+
     let mut verts = Vec::new();
     let mut labels = Vec::new();
     let mut draw_commands = Vec::new();
@@ -339,10 +381,9 @@ fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, string
 
         let width = font.width(&strings[raw_tile.name[i].unwrap()]);
 
-        let mut t = Transform::identity();
-        t.scale(&Vector2::new(font_scale, font_scale));
+        let mut t = t.clone();
         t.translate(&Vector2::new(-width/2.0, 0.0));
-        // t.translate(&Vector2::new(SIZE, 0.0));
+
         let (min, max) = font.layout_text(&mut verts, &mut draw_commands, &strings[raw_tile.name[i].unwrap()], &t, *v);
         labels.push(Label{
             cmds: draw_commands.len() - size_before,
@@ -350,6 +391,8 @@ fn compile_region_layer<R: Renderer>(raw_tile: &crate::mapbox::PointGeom, string
             rank: 0,
             pos: *v,
             not_before: 0.0,
+            opacity: 0.0,
+            opacity_from: Some(allocated_fades[i]),
         });
     }
     return R::upload_multi_layer(&verts, draw_commands, 0, labels);
@@ -385,7 +428,7 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
             raw_tile.data.len()
         };
 
-        // Calculate the length of the line
+        // Calculate the length of the linestring
         let mut len = 0.0;
         for j in 0..end-start-1 {
             let p1 = raw_tile.data[start + j];
@@ -481,7 +524,9 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
                     cmds: cmd.len() - size_before,
                     pos: pos.downcast(),
                     // @HACK: These are just some random numbers
-                    not_before: 30000.0 + 20000.0 * 2.0_f32.powi(rank as _) as f32,
+                    not_before: 5000.0 + 10000.0 * 4.0_f32.powi(rank as _) as f32,
+                    opacity: 0.0,
+                    opacity_from: None,
                 });
 
                 rank_step = (rank_step+1) % RANK_SEQ.len();
@@ -499,19 +544,21 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
 pub fn compile_tile<R: Renderer>(id: u64, font: &mut FontMetric, x: u64, y: u64, z: u8, raw_tile: RawTile) -> Result<Tile<R>, String> {
     let font_size = 2.0_f32.powi(z as i32 - 15);
 
+    let mut fades = Vec::new();
+
     let layers = [
         Some(compile_polygon_layer::<R>(&raw_tile.earth, z)),
         Some(compile_line_layer::<R>(&raw_tile.roads, &raw_tile.strings, font, font_size*0.25, 4)),
-        Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*4.0, 0)),
-        Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*1.0, 1)),
-        Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*1.0, 2)),
+        Some(compile_line_layer::<R>(&raw_tile.highways, &raw_tile.strings, font, font_size*1.0, 0)),
+        Some(compile_line_layer::<R>(&raw_tile.major, &raw_tile.strings, font, font_size*0.75, 1)),
+        Some(compile_line_layer::<R>(&raw_tile.medium, &raw_tile.strings, font, font_size*0.75, 2)),
         Some(compile_line_layer::<R>(&raw_tile.minor, &raw_tile.strings, font, font_size*0.5, 2)),
         Some(compile_polygon_layer::<R>(&raw_tile.buildings, z)),
         Some(compile_polygon_layer::<R>(&raw_tile.water, z)),
         Some(compile_polygon_layer::<R>(&raw_tile.farmland, z)),
         Some(compile_polygon_layer::<R>(&raw_tile.areas, z)),
 
-        Some(compile_region_layer::<R>(&raw_tile.points, &raw_tile.strings, font, font_size*4.0, z)),
+        Some(compile_region_layer::<R>(&raw_tile.points, &raw_tile.strings, &mut fades, font, font_size*4.0, z)),
     ];
 
     // @INCOMPLETE @CLEANUP: The extent here should be read from the file
@@ -519,6 +566,7 @@ pub fn compile_tile<R: Renderer>(id: u64, font: &mut FontMetric, x: u64, y: u64,
         tid: id,
         x, y, z,
         extent: 4096,
+        fades,
         layers,
     });
 }

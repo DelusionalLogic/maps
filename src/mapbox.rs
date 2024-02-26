@@ -330,7 +330,6 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
 
         let name_index = &name_indexes[0];
 
-        dbg!(&name_index);
         let mut index : Vec<usize> = (0..name_index.len()).collect();
         index.sort_by_key(|x| name_index[*x]);
         let (index, mut names) = lookup_values(&mut name_reader, &name_index, &index).unwrap();

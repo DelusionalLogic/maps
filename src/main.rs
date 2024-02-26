@@ -11,6 +11,8 @@ use maps::math::Transform;
 use maps::math::Vector2;
 use maps::map::GlLayer;
 use maps::map::RenderCommand;
+use maps::math::lerp;
+use maps::math::remap;
 use maps::pmtile::PMTile;
 use maps::triangulate;
 use maps::label;
@@ -18,6 +20,8 @@ use maps::math::Mat4;
 use maps::math::Mat3;
 use maps::world::World;
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::ffi::CString;
 
@@ -28,10 +32,6 @@ use gl;
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
-
-fn lerp(v0: f32, v1: f32, t: f32) -> f32 {
-  return v0 + t * (v1 - v0);
-}
 
 fn compile_shader(vert: &str, frag: &str) -> u32 {
     let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
@@ -108,6 +108,8 @@ pub struct FontProg {
     texture: i32,
     transform: i32,
     target: i32,
+    fill_color: i32,
+    line_color: i32,
 }
 
 fn load_font() -> FontMetric {
@@ -155,13 +157,14 @@ fn main() {
 
     unsafe {
         gl::Viewport(0, 0, display.width, display.height);
-        clear_color(Color(0.4, 0.4, 0.4, 1.0));
+        let c = Color(0.4, 0.4, 0.4, 1.0);
+        gl::ClearColor(c.0, c.1, c.2, c.3);
     }
     println!("OpenGL version: {}", gl_get_string(gl::VERSION));
     println!("GLSL version: {}", gl_get_string(gl::SHADING_LANGUAGE_VERSION));
     // -------------------------------------------
 
-    let font = load_font();
+    let mut font = load_font();
 
     const FONT_VERT_SHADER: &str = "
         #version 330 core
@@ -187,6 +190,8 @@ fn main() {
 
         uniform sampler2D tex;
         uniform bool target;
+        uniform vec4 fill_color;
+        uniform vec4 line_color;
 
         const float smoothing = 1.0/16.0;
         const float mid = 0.5;
@@ -200,10 +205,10 @@ fn main() {
                 float dist = texture(tex, uv).r;
 
                 float border_alpha = smoothstep(mid-0.2 - smoothing, mid-0.2 + smoothing, dist);
-                color = vec4(vec3(0.0, 0.2, 0.3)*border_alpha, border_alpha);
+                color = line_color*border_alpha;
 
                 float alpha = smoothstep(mid - smoothing, mid + smoothing, dist);
-                color = mix(color, vec4(vec3(1.0), 1.0), alpha);
+                color = mix(color, fill_color, alpha);
             }
         }
     ";
@@ -326,12 +331,16 @@ fn main() {
         let texture = CString::new("tex").unwrap();
         let transform = CString::new("transform").unwrap();
         let target = CString::new("target").unwrap();
+        let fill_color_str = CString::new("fill_color").unwrap();
+        let line_color_str = CString::new("line_color").unwrap();
         unsafe {
             FontProg {
                 program,
                 texture: gl::GetUniformLocation(program, texture.as_ptr()),
                 transform: gl::GetUniformLocation(program, transform.as_ptr()),
                 target: gl::GetUniformLocation(program, target.as_ptr()),
+                fill_color: gl::GetUniformLocation(program, fill_color_str.as_ptr()),
+                line_color: gl::GetUniformLocation(program, line_color_str.as_ptr()),
             }
         }
     };
@@ -438,6 +447,7 @@ fn main() {
             tid: 0,
             x: 0, y: 0, z: 0,
             extent: 4096,
+            fades: Vec::new(),
             layers,
         }
     };
@@ -454,14 +464,21 @@ fn main() {
         (LayerType::HIGHWAYS, false),
     ];
 
+    struct LabelData {
+        opacity: f32,
+        goal: f32,
+    }
+    let mut fader_binds = HashMap::new();
+
     let mut projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
     let mut hold: Option<Vector2<f64>> = None;
     let mut zoom = 0.0;
     let mut scale = 1.0;
     let mut viewport_pos = Vector2::new(0.0_f64, 0.0);
+    let mut viewport_size;
     let mut mouse_world = Vector2::new(0.0, 0.0);
     const MAP_SIZE : u64 = 512;
-    let mut tiles = World::new(PMTile::new("aalborg.pmtiles"), font);
+    let mut tiles = World::new(PMTile::new("aalborg.pmtiles"));
     while !window.should_close() {
         glfw.poll_events();
 
@@ -497,6 +514,8 @@ fn main() {
         if display.size_change {
             projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
         }
+        viewport_size = Vector2::new(display.width as _, display.height as _);
+        viewport_size /= scale;
 
         if window.get_mouse_button(glfw::MouseButtonLeft) == glfw::Action::Press {
             if let Some(hold) = hold {
@@ -511,26 +530,47 @@ fn main() {
             hold = None;
         }
 
-        {
+        let (to_add, _to_remove) = {
             let scale_level = scale_level.min(tiles.source.max_zoom as u64);
             let native_resolution = MAP_SIZE as f64 / 2.0_f64.powi(scale_level as i32);
-            let left = ((viewport_pos.x / native_resolution).floor() as i64).max(0) as u64;
-            let top = ((viewport_pos.y / native_resolution).floor() as i64).max(0) as u64;
-            let right = (((viewport_pos.x + (display.width as f64/scale as f64)) / native_resolution).ceil() as i64).max(0) as u64;
-            let bottom = (((viewport_pos.y + (display.height as f64/scale as f64)) / native_resolution).ceil() as i64).max(0) as u64;
+            let top_left = {
+                let mut v = viewport_pos.clone();
+                v /= native_resolution;
+                v.floor();
+                v.quant()
+            };
+            let bottom_right: Vector2<u64> = {
+                let mut v = viewport_pos.clone();
+                v += viewport_size;
+                v /= native_resolution;
+                v.ceil();
+                v.quant()
+            };
 
-            tiles.retrieve_visible_tiles(left, top, right, bottom, scale_level as u8);
+            tiles.update_visible_tiles(top_left.x, top_left.y, bottom_right.x, bottom_right.y, scale_level as u8, &mut font)
+        };
+
+        {
+            let needs_bind : HashSet<String> = to_add.iter().flat_map(|tid| {
+                tiles.get(*tid).unwrap().fades.iter().map(|x| &x.key).cloned()
+            }).collect();
+
+
+            for key in needs_bind {
+                if !fader_binds.contains_key(&key) {
+                    fader_binds.insert(key, LabelData{ opacity: 0.0, goal: 0.0 });
+                }
+            }
         }
-
 
         let mut world_to_screen = projection.clone();
 
         world_to_screen.scale(&Vector2::new(scale as f64, scale as f64));
         world_to_screen.translate(&Vector2::new(-viewport_pos.x, -viewport_pos.y));
 
-        clear_color(Color(0.0, 0.1, 0.15, 1.0));
-
         unsafe {
+            let c = Color(0.0, 0.1, 0.15, 1.0);
+            gl::ClearColor(c.0, c.1, c.2, c.3);
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
@@ -555,7 +595,7 @@ fn main() {
                 }
 
                 impl RenderMode {
-                    fn set_mode(&mut self, new: RenderMode, shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform32: &Transform, color: &Color, width: f32) {
+                    fn go_to(&mut self, new: RenderMode, shader_program: &LineProg, font_shader: &FontProg, projection32: Option<&GLTransform>, tile_transform32: &Transform, color: &Color, width: f32) {
                         match new {
                             _ if *self == new => {}
                             RenderMode::UNINIT => panic!("You can't switch to uninit"),
@@ -581,6 +621,9 @@ fn main() {
 
                                     gl::UseProgram(font_shader.program);
                                     gl::Uniform1i(font_shader.texture, 0);
+                                    let Color(r, g, b, a) = color;
+                                    gl::Uniform4f(font_shader.fill_color, *r, *g, *b, *a);
+                                    gl::Uniform4f(font_shader.line_color, 0.0 * a, 0.2 * a, 0.3 * a, *a);
                                 }
                             },
                         }
@@ -593,7 +636,7 @@ fn main() {
                 for cmd in commands {
                     let x = match cmd {
                         RenderCommand::Simple(x) => {
-                            mode.set_mode(RenderMode::SIMPLE, shader_program, font_shader, projection, tile_transform, color, width);
+                            mode.go_to(RenderMode::SIMPLE, shader_program, font_shader, projection, tile_transform, color, width);
                             if mode != RenderMode::SIMPLE {
 
                                 mode = RenderMode::SIMPLE;
@@ -602,7 +645,7 @@ fn main() {
                             x
                         }
                         RenderCommand::Target(t, x) => {
-                            mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
+                            mode.go_to(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
                             trans.translate(t);
@@ -615,7 +658,7 @@ fn main() {
                             x
                         }
                         RenderCommand::PositionedLetter(c, t, x) => {
-                            mode.set_mode(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
+                            mode.go_to(RenderMode::TEXT, shader_program, font_shader, projection, tile_transform, color, width);
 
                             let mut trans = tile_transform.clone();
                             trans.translate(t);
@@ -654,21 +697,17 @@ fn main() {
 
         let mut vao_offsets = Vec::with_capacity(tiles.visible.len());
         let mut offsets = Vec::with_capacity(tiles.visible.len());
-        let mut vaos = Vec::with_capacity(tiles.visible.len());
-        let mut commands = Vec::with_capacity(tiles.visible.len());
         let mut tile_to_screen_transforms = Vec::with_capacity(tiles.visible.len());
 
         let inverse_scale = 1.0/scale as f32 * 2.0_f32.powi(15);
-        let text_zoom_scale = if zoom >= 14.0 {
-                        1.0
-                    } else if zoom >= 13.0 {
-                        lerp(3.0, 1.0, zoom - 13.0)
-                    } else {
-                        3.0
-                    };
+        let text_zoom_scale = if zoom >= 15.5 {
+            remap(15.5, 18.5, 6.0, 1.0, zoom)
+        } else {
+            remap(14.5, 15.5, 8.0, 6.0, zoom)
+        };
 
         for (local_tid, tid) in tiles.visible.iter().enumerate() {
-            let tile = tiles.active.get(tid).unwrap();
+            let tile = tiles.get(*tid).unwrap();
 
             let grid_step = MAP_SIZE as f64 / 2.0_f64.powi(tile.z as i32);
 
@@ -735,15 +774,15 @@ fn main() {
                 projection.to_gl()
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut tiles.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut tiles.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut tiles.font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut tiles.font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut font, 0.0);
 
             {
                 let road_layers = [
-                    (LayerType::ROADS, Color(0.024, 0.118, 0.173, 1.0), Color(0.75, 0.196, 0.263, 1.0), 0.00001),
+                    (LayerType::ROADS, Color(0.024, 0.118, 0.173, 1.0), Color(0.176, 0.247, 0.298, 1.0), 0.00001),
                     (LayerType::MINOR, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004),
                     (LayerType::MEDIUM, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007),
                     (LayerType::MAJOR, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009),
@@ -751,26 +790,25 @@ fn main() {
                 ];
 
                 for (layer, bgcolor, _, width)  in &road_layers {
-                    let outline_width = 1.0/scale;
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], bgcolor, *width + outline_width as f32, &mut tiles.font, 0.0);
+                    let outline_width = 2.0/scale;
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], bgcolor, *width + outline_width as f32, &mut font, 0.0);
                 }
 
                 for (layer, _, fgcolor, width)  in &road_layers {
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], fgcolor, *width, &mut tiles.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &tile_to_screen, &tile.layers[*layer as usize], fgcolor, *width, &mut font, 0.0);
                 }
             }
 
-            {
+            unsafe {
+                gl::Disable(gl::SCISSOR_TEST);
+            }
 
+            {
                 let mut tile_vao_offsets = vec![0; overlay_layers.len()];
                 let mut tile_offsets = vec![0; overlay_layers.len()];
-                let mut tile_vaos = vec![0; overlay_layers.len()];
-                let mut tile_commands = Vec::with_capacity(overlay_layers.len());
 
                 for (layer_id, (layer_type, screen_relative)) in overlay_layers.into_iter().enumerate() {
                     if let Some(layer) = &tile.layers[layer_type as usize] {
-                        tile_vaos[layer_id] = layer.vao;
-                        tile_commands.push(&layer.commands);
                         tile_offsets[layer_id] = layer.blocks[0];
                         // @HACK @PERF Calculate the offset for the first conditional triangle.
                         // This shouldn't really be done here, we should remember this from when we
@@ -794,14 +832,14 @@ fn main() {
                             text_zoom_scale
                         };
 
-                        for label in &layer.labels {
+                        for (label_id, label) in layer.labels.iter().enumerate() {
                             // @HACK we place it in the middle of the baseline, but the middle of
                             // the baseline is defined as the centerpoint between the start pen
                             // location and the right side of the bounding box (which is not
                             // necessarily the ending pen location). It might look better to use
                             // the middle of the bounding box in the x direction.
                             labels.push(label);
-                            draw_stuff.push((local_tid, layer_id, screen_relative));
+                            draw_stuff.push((local_tid, layer_id, label_id, screen_relative));
 
                             // The clipspace transform
                             let mvp3d: &Mat4 = (&tile_to_world).into();
@@ -823,14 +861,8 @@ fn main() {
                         }
                     }
                 }
-                vaos.push(tile_vaos);
-                commands.push(tile_commands);
                 offsets.push(tile_offsets);
                 vao_offsets.push(tile_vao_offsets);
-            }
-
-            unsafe {
-                gl::Disable(gl::SCISSOR_TEST);
             }
 
             // {
@@ -857,51 +889,96 @@ fn main() {
 
                     // @HACK This is just because the border layer is a hack as well.
                     entity_to_screen.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
-
                     let gl_proj = projection.to_gl();
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut tiles.font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut font, 0.0);
                 }
             }
 
-            let mut to_draw: Vec<usize> = (0..boxes.len()).collect();
+            let mut desired_visible: Vec<usize> = (0..boxes.len()).collect();
 
             // Discard labels that are too small
-            to_draw.retain(|i| {
-                (labels[*i].not_before as f64) < scale
+            desired_visible.retain(|i| {
+                (labels[*i].not_before as f64) <= scale
             });
 
             // Cull offscreen labels
             {
-                let left = viewport_pos.x as f32;
-                let top = viewport_pos.y as f32;
-                let right = viewport_pos.x + (display.width as f64/scale as f64);
-                let bottom = viewport_pos.y + (display.height as f64/scale as f64);
+                let top_left = viewport_pos;
+                let bottom_right = {
+                    let mut v = viewport_pos.clone();
+                    v += viewport_size;
+                    v
+                };
 
-                to_draw.retain(|i| {
+                desired_visible.retain(|i| {
                     let bbox = &boxes[*i];
 
-                    bbox.min.x <= right as f32 && bbox.max.x >= left as f32
-                        && bbox.min.y <= bottom as f32 && bbox.max.y >= top as f32
+                    bbox.min.x <= bottom_right.x as f32 && bbox.max.x >= top_left.x as f32
+                        && bbox.min.y <= bottom_right.y as f32 && bbox.max.y >= top_left.y as f32
                 });
             }
 
-            to_draw.sort_by_key(|i| labels[*i].rank);
+            desired_visible.sort_by_key(|i| labels[*i].rank);
 
-            // And select a set that doesn't overlap
-            label::select_nooverlap(&boxes, &mut to_draw);
+            // Select a set that doesn't overlap
+            label::select_nooverlap(&boxes, &mut desired_visible);
 
-            to_draw.sort();
+            desired_visible.sort();
 
-            let mut draw_cursor = 0;
-            for i in 0..labels.len() {
-                if draw_cursor >= to_draw.len() {
-                    break;
+            for (_, x) in fader_binds.iter_mut() {
+                x.goal = 0.0;
+            }
+
+            let mut visible_cursor = 0;
+            let num_labels = labels.len();
+            // Set the end goal of all the fades
+            // @HACK This also steps the unique fades, that's kinda silly. Maybe we should create
+            // fades for those as well somehow?
+            for i in 0..num_labels {
+                assert!(visible_cursor >= desired_visible.len() || desired_visible[visible_cursor] >= i);
+
+                let (local_tile_id, layer_id, label_id, _) = &draw_stuff[i];
+                let tile = tiles.get_mut(tiles.visible[*local_tile_id]).unwrap();
+                let layer = tile.layers[overlay_layers[*layer_id].0 as usize].as_mut().unwrap();
+                let label = &mut layer.labels[*label_id];
+
+                let target_opacity = if visible_cursor < desired_visible.len() && desired_visible[visible_cursor] == i {
+                    visible_cursor += 1;
+                    1.0
+                } else {
+                    0.0
+                };
+
+                if let Some(x) = &label.opacity_from {
+                    let label_data = fader_binds.get_mut(&tile.fades[*x].key).unwrap();
+                    label_data.goal = label_data.goal.max(target_opacity);
+                } else {
+                    label.opacity = lerp(label.opacity, target_opacity, 0.1);
                 }
+            }
 
-                assert!(to_draw[draw_cursor] >= i);
+            // Step the shared fades
+            for (_, x) in fader_binds.iter_mut() {
+                x.opacity = lerp(x.opacity, x.goal, 0.1);
+            }
 
-                let label = labels[i];
-                let (local_tile_id, layer_id, screenspace_scale) = &draw_stuff[i];
+            // Copy the opacity back into the labels
+            // @PERF This seems unnecessary
+            for i in 0..num_labels {
+                let (local_tile_id, layer_id, label_id, _) = &draw_stuff[i];
+                let tile = tiles.get_mut(tiles.visible[*local_tile_id]).unwrap();
+                let layer = tile.layers[overlay_layers[*layer_id].0 as usize].as_mut().unwrap();
+                let label = &mut layer.labels[*label_id];
+
+                if let Some(x) = &label.opacity_from {
+                    let label_data = fader_binds.get_mut(&tile.fades[*x].key).unwrap();
+                    label.opacity = label_data.opacity;
+                }
+            }
+
+            // Do the render
+            for i in 0..num_labels {
+                let (local_tile_id, layer_id, label_id, screenspace_scale) = &draw_stuff[i];
 
                 let scale_factor = if *screenspace_scale {
                     inverse_scale
@@ -909,13 +986,15 @@ fn main() {
                     text_zoom_scale
                 };
 
-                let commands = &mut commands[*local_tile_id][*layer_id];
-                let vao = &mut vaos[*local_tile_id][*layer_id];
+                let tile = tiles.get_mut(tiles.visible[*local_tile_id]).unwrap();
+                let layer = tile.layers[overlay_layers[*layer_id].0 as usize].as_mut().unwrap();
+                let commands = &layer.commands;
+                let vao = &layer.vao;
                 let offset = &mut offsets[*local_tile_id][*layer_id];
                 let vao_offset = &mut vao_offsets[*local_tile_id][*layer_id];
+                let label = &mut layer.labels[*label_id];
 
-                let executed = if to_draw[draw_cursor] == i {
-                    draw_cursor += 1;
+                let executed = if label.opacity > f32::EPSILON {
                     run_commands(
                         &shader_program,
                         &font_shader,
@@ -923,8 +1002,8 @@ fn main() {
                         &tile_to_screen_transforms[*local_tile_id],
                         *vao,
                         &commands[*offset..*offset+label.cmds],
-                        &Color(1.0, 1.0, 1.0, 1.0), 0.0,
-                        &mut tiles.font,
+                        &Color(label.opacity, label.opacity, label.opacity, label.opacity), 0.0,
+                        &mut font,
                         scale_factor,
                         *vao_offset
                     )
@@ -948,7 +1027,7 @@ fn main() {
 
         // Draw the pois
         for tid in &tiles.visible {
-            let tile = tiles.active.get(tid).unwrap();
+            let tile = tiles.get(*tid).unwrap();
             let mut tile_trans = world_to_screen.clone();
 
             let scale_factor = 2.0_f64.powi(tile.z as i32 - 15) as f32 * (1.0/scale as f32)*10.0 * 36000.0;
@@ -964,7 +1043,7 @@ fn main() {
                 tile_trans
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers[LayerType::POINTS as usize], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut tiles.font, scale_factor);
+            render_poly(&shader_program, &font_shader, None, &tile_trans, &tile.layers[LayerType::POINTS as usize], &Color(1.0, 1.0, 1.0, 1.0), 0.0, &mut font, scale_factor);
         }
 
         // let mut text_transform = projection.clone();
@@ -980,10 +1059,6 @@ fn main() {
 }
 
 pub struct Color(f32, f32, f32, f32);
-
-pub fn clear_color(c: Color) {
-    unsafe { gl::ClearColor(c.0, c.1, c.2, c.3) }
-}
 
 struct DisplayState {
     size_change: bool,

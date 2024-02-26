@@ -166,8 +166,22 @@ impl Vector2<f64> {
         return f64::atan2(self.y, self.x);
     }
 
-    pub fn downcast(self) -> Vector2<f32> {
+    pub fn downcast(&self) -> Vector2<f32> {
         return Vector2::new(self.x as _, self.y as _);
+    }
+
+    pub fn ceil(mut self) {
+        self.x = self.x.ceil();
+        self.y = self.y.ceil();
+    }
+
+    pub fn floor(mut self) {
+        self.x = self.x.floor();
+        self.y = self.y.floor();
+    }
+
+    pub fn quant(self) -> Vector2<u64> {
+        return Vector2::new(self.x as u64, self.y as u64);
     }
 }
 
@@ -374,5 +388,17 @@ impl Clone for Transform {
         let (primary, _) = self.split();
         return Transform::from_mat(self.mats[primary].clone());
     }
+}
+
+pub fn lerp(v0: f32, v1: f32, t: f32) -> f32 {
+  return v0 + t * (v1 - v0);
+}
+
+pub fn ilerp(v0: f32, v1: f32, t: f32) -> f32 {
+  return (t - v0) / (v1 - v0);
+}
+
+pub fn remap(i0: f32, i1: f32, o0: f32, o1: f32, t: f32) -> f32 {
+    return lerp(o0, o1, ilerp(i0, i1, t).clamp(0.0, 1.0));
 }
 
