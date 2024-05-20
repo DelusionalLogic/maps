@@ -8,3 +8,4 @@ pub mod world;
 pub mod pbuf;
 pub mod io;
 pub mod pmtile;
+pub mod debug;

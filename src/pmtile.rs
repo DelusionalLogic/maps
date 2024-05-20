@@ -218,7 +218,7 @@ impl<'a> PMTile {
     fn read_directory(&mut self, offset: u64, len: usize) -> &Directory {
         match self.dcache.entry(offset) {
             std::collections::hash_map::Entry::Occupied(e) => {
-                let mut dir = e.into_mut();
+                let dir = e.into_mut();
 
                 // Unlink the item
                 if let Some(mut x) = dir.prev {

@@ -25,23 +25,23 @@ pub struct LoadedTexture {
 }
 
 pub struct TexInfo {
-    pub bearing: Vector2<f32>,
     pub size: Vector2<f32>,
+    pub bearing: Vector2<f32>,
     pub texture: LoadedTexture,
 }
 
-pub struct CharMetric<'a> {
+pub struct CharMetric {
     pub size: Vector2<f32>,
     pub bearing: Vector2<f32>,
     pub advance: i16,
 
-    pub texdata: &'a TexInfo,
+    pub tex: TexInfo,
 }
 
 pub struct FontMetric {
     face: Face,
 
-    pub characters: HashMap<usize, TexInfo>,
+    pub characters: HashMap<usize, CharMetric>,
 }
 
 // @HACK @COMPLETE: This iterates over unicode values. In reality we probably want to use
@@ -54,29 +54,12 @@ impl FontMetric {
         };
     }
 
-    pub fn size_char(&mut self, char: usize) -> CharMetric {
-        self.face.load_char(char, freetype::face::LoadFlag::DEFAULT).unwrap();
-        let glyph = self.face.glyph();
-        let metrics = glyph.metrics();
-        let size = Vector2::new(metrics.width as f32 /64.0, metrics.height as f32 /64.0);
-        let bearing = Vector2::new(
-            metrics.horiBearingX as f32 /64.0,
-            -metrics.horiBearingY as f32 /64.0,
-        );
-        let advance = metrics.horiAdvance >> 6;
-
-        return CharMetric {
-            size,
-            bearing,
-            advance: advance as i16,
-
-            texdata: self.load_char(char),
-        };
+    pub fn size_char(&mut self, char: usize) -> &CharMetric {
+        return self.load_char(char);
     }
 
-    pub fn load_char(&mut self, char: usize) -> &TexInfo {
+    pub fn load_char(&mut self, char: usize) -> &CharMetric {
         if !self.characters.contains_key(&char) {
-            dbg!("Generate for", char);
             self.face.load_char(char, freetype::face::LoadFlag::RENDER).unwrap();
             let glyph = self.face.glyph();
             glyph.render_glyph(freetype::render_mode::RenderMode::Sdf).unwrap();
@@ -87,8 +70,8 @@ impl FontMetric {
                 gl::GenTextures(1, textures.as_mut_ptr());
                 gl::BindTexture(gl::TEXTURE_2D, textures[0]);
                 gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                 gl::TexStorage2D(
@@ -115,9 +98,25 @@ impl FontMetric {
                 size: Vector2::new(bitmap.width() as f32, bitmap.rows() as f32)
             };
 
-            self.characters.insert(char, info);
+            let glyph = self.face.glyph();
+            let metrics = glyph.metrics();
+            let size = Vector2::new(metrics.width as f32 /64.0, metrics.height as f32 /64.0);
+            let bearing = Vector2::new(
+                metrics.horiBearingX as f32 /64.0,
+                -metrics.horiBearingY as f32 /64.0,
+                );
+            let advance = metrics.horiAdvance >> 6;
 
-            return self.characters.get(&char).unwrap();
+            let metric = CharMetric {
+                size,
+                bearing,
+                advance: advance as i16,
+
+                tex: info,
+            };
+
+            self.characters.insert(char, metric);
+
         }
 
         return self.characters.get(&char).unwrap();
@@ -166,7 +165,7 @@ impl FontMetric {
 
         for c in text.chars() {
             let sze = self.size_char(c as usize);
-            let texture = sze.texdata;
+            let texture = &sze.tex;
 
             let min = {
                 let mut vec = pen.clone();

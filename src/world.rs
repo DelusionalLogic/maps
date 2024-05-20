@@ -18,7 +18,7 @@ use crate::{
     }
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct TileHandle { 
     value: u64
 }

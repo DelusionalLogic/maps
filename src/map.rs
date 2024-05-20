@@ -450,9 +450,10 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
 
         const DISTANCE_BETWEEN_LABELS: f64 = 100.0;
         let mut next = len % DISTANCE_BETWEEN_LABELS;
+        let num_labels = ((len / DISTANCE_BETWEEN_LABELS) as u64) % 8;
 
-        const RANK_SEQ: [u8; 8] = [0, 3, 2, 3, 1, 3, 2, 3];
-        let mut rank_step = 0;
+        const RANK_SEQ: [u8; 8] = [3, 2, 3, 1, 3, 2, 3, 0];
+        let mut rank_step = 7-num_labels as usize;
 
         let text = raw_tile.name[i];
         if text.is_none() {
@@ -491,32 +492,33 @@ fn compile_line_layer<R: Renderer>(raw_tile: &crate::mapbox::LineGeom, strings: 
                 pos *= next;
                 pos += v1;
 
-                let width = font.width(text);
+                let rank = RANK_SEQ[rank_step] + rank_start;
+                // let text = rank.to_string();
+                let width = font.width(&text);
+
 
                 // @FIX @UX This basically stops us from placing labels on bendy bits. We
                 // might want to allow hanging off the end if the bend isn't very sharp.
-                if next < (width*font_scale) as f64/2.0 {
-                    // If there's not enough space for the label, push it in so that there
-                    // is.
-                    next = (width*font_scale) as f64/2.0;
-                    continue;
-                } else if segment_len - next < (width*font_scale) as f64/2.0 {
-                    // If there's not enough remaining space on the segment, push it into
-                    // the next segment (plus half the width of the string to make sure
-                    // there's room for it)
-                    next = segment_len + (width*font_scale) as f64/2.0;
-                    continue;
-                }
+                 if next < (width*font_scale) as f64/2.0 {
+                     // If there's not enough space for the label, push it in so that there
+                     // is.
+                     next = (width*font_scale) as f64/2.0;
+                     continue;
+                 } else if segment_len - next < (width*font_scale) as f64/2.0 {
+                     // If there's not enough remaining space on the segment, push it into
+                     // the next segment (plus half the width of the string to make sure
+                     // there's room for it)
+                     next = segment_len + (width*font_scale) as f64/2.0;
+                     continue;
+                 }
 
                 let mut t = Transform::identity();
                 t.rotate(orientation);
                 t.scale(&Vector2::new(font_scale, font_scale));
                 t.translate(&Vector2::new(-width/2.0, 0.0));
 
-                let rank = RANK_SEQ[rank_step] + rank_start;
-
                 let size_before = cmd.len();
-                let (min, max) = font.layout_text(&mut line.verts, &mut cmd, text, &t, pos.downcast());
+                let (min, max) = font.layout_text(&mut line.verts, &mut cmd, &text, &t, pos.downcast());
 
                 labels.push(Label{
                     rank: rank as u8,

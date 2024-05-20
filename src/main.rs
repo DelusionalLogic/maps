@@ -33,6 +33,54 @@ const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const TITLE: &str = "Hello From OpenGL World!";
 
+fn hsv2rgb(hsv: &mut Color) {
+    if hsv.1 <= 0.0 {
+        hsv.0 = 0.0;
+        hsv.1 = 0.0;
+        hsv.2 = 0.0;
+        return;
+    }
+
+    let hh = if hsv.0 >= 360.0 { 0.0 } else { hsv.0/60.0 };
+    let i = hh as u8;
+    let ff = hh - i as f32;
+    let p = hsv.2 * (1.0 - hsv.1);
+    let q = hsv.2 * (1.0 - (hsv.1 * ff));
+    let t = hsv.2 * (1.0 - (hsv.1 * (1.0 - ff)));
+
+    match i {
+        0 => {
+            hsv.0 = hsv.2;
+            hsv.1 = t;
+            hsv.2 = p;
+        },
+        1 => {
+            hsv.1 = hsv.2;
+            hsv.0 = q;
+            hsv.2 = p;
+        }
+        2 => {
+            hsv.1 = hsv.2;
+            hsv.0 = p;
+            hsv.2 = t;
+        }
+        3 => {
+            hsv.0 = p;
+            hsv.1 = q;
+        }
+        4 => {
+            hsv.0 = t;
+            hsv.1 = p;
+        }
+        5 => {
+            hsv.0 = hsv.2;
+            hsv.1 = p;
+            hsv.2 = q;
+        }
+        _ => panic!("Fuck"),
+    }
+}
+
 fn compile_shader(vert: &str, frag: &str) -> u32 {
     let vertex_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
     unsafe {
@@ -469,6 +517,7 @@ fn main() {
         goal: f32,
     }
     let mut fader_binds = HashMap::new();
+    let mut tile_faders = HashMap::new();
 
     let mut projection = Transform::from_mat(Mat4::ortho(0.0, display.width as _, display.height as _, 0.0, 0.0, 1.0));
     let mut hold: Option<Vector2<f64>> = None;
@@ -530,7 +579,7 @@ fn main() {
             hold = None;
         }
 
-        let (to_add, _to_remove) = {
+        let (to_add, to_remove) = {
             let scale_level = scale_level.min(tiles.source.max_zoom as u64);
             let native_resolution = MAP_SIZE as f64 / 2.0_f64.powi(scale_level as i32);
             let top_left = {
@@ -550,17 +599,21 @@ fn main() {
             tiles.update_visible_tiles(top_left.x, top_left.y, bottom_right.x, bottom_right.y, scale_level as u8, &mut font)
         };
 
-        {
-            let needs_bind : HashSet<String> = to_add.iter().flat_map(|tid| {
-                tiles.get(*tid).unwrap().fades.iter().map(|x| &x.key).cloned()
-            }).collect();
-
-
-            for key in needs_bind {
-                if !fader_binds.contains_key(&key) {
-                    fader_binds.insert(key, LabelData{ opacity: 0.0, goal: 0.0 });
+        // Bind the new fades into the global fader pool
+        for tid in x.goaladd {
+            let tile = tiles.get(tid).unwrap();
+            for fade in &tile.fades {
+                if !fader_binds.contains_key(&fade.key) {
+                    fader_binds.insert(fade.key.clone(), LabelData{ opacity: 0.0, goal: 0.0 });
                 }
             }
+            if !tile_faders.contains_key(&tid) {
+                tile_faders.insert(tid, LabelData{ opacity: 0.0, goal: 1.0 });
+            }
+        }
+
+        for tid in to_remove {
+            tile_faders.remove(&tid);
         }
 
         let mut world_to_screen = projection.clone();
@@ -668,8 +721,8 @@ fn main() {
 
                             gl::Uniform1i(font_shader.target, 0);
 
-                            let texture = &font.size_char(*c as usize);
-                            gl::BindTexture(gl::TEXTURE_2D, texture.texdata.texture.atlas.gl_texture);
+                            let char = &font.size_char(*c as usize);
+                            gl::BindTexture(gl::TEXTURE_2D, char.tex.texture.atlas.gl_texture);
 
                             x
                         }
@@ -774,19 +827,21 @@ fn main() {
                 projection.to_gl()
             };
 
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0), 0.0, &mut font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0), 0.0, &mut font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0), 0.0, &mut font, 0.0);
-            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0), 0.0, &mut font, 0.0);
+            let opacity = tile_faders.get(tid).unwrap().opacity;
+
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::EARTH as usize], &Color(0.1, 0.3, 0.4, 1.0).set_alpha(opacity), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::AREAS as usize], &Color(0.07, 0.27, 0.37, 1.0).set_alpha(opacity), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::FARMLAND as usize], &Color(0.07, 0.27, 0.37, 1.0).set_alpha(opacity), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::BUILDINGS as usize], &Color(0.0, 0.2, 0.3, 1.0).set_alpha(opacity), 0.0, &mut font, 0.0);
+            render_poly(&shader_program, &font_shader, None, &tile_to_screen, &tile.layers[LayerType::WATER as usize], &Color(0.082, 0.173, 0.267, 1.0).set_alpha(opacity), 0.0, &mut font, 0.0);
 
             {
                 let road_layers = [
-                    (LayerType::ROADS, Color(0.024, 0.118, 0.173, 1.0), Color(0.176, 0.247, 0.298, 1.0), 0.00001),
-                    (LayerType::MINOR, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00004),
-                    (LayerType::MEDIUM, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00007),
-                    (LayerType::MAJOR, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00009),
-                    (LayerType::HIGHWAYS, Color(0.024, 0.118, 0.173, 1.0), Color(0.075, 0.196, 0.263, 1.0), 0.00020),
+                    (LayerType::ROADS, Color(0.024, 0.118, 0.173, 1.0).set_alpha(opacity), Color(0.176, 0.247, 0.298, 1.0).set_alpha(opacity), 0.00001),
+                    (LayerType::MINOR, Color(0.024, 0.118, 0.173, 1.0).set_alpha(opacity), Color(0.075, 0.196, 0.263, 1.0).set_alpha(opacity), 0.00004),
+                    (LayerType::MEDIUM, Color(0.024, 0.118, 0.173, 1.0).set_alpha(opacity), Color(0.075, 0.196, 0.263, 1.0).set_alpha(opacity), 0.00007),
+                    (LayerType::MAJOR, Color(0.024, 0.118, 0.173, 1.0).set_alpha(opacity), Color(0.075, 0.196, 0.263, 1.0).set_alpha(opacity), 0.00009),
+                    (LayerType::HIGHWAYS, Color(0.024, 0.118, 0.173, 1.0).set_alpha(opacity), Color(0.075, 0.196, 0.263, 1.0).set_alpha(opacity), 0.00020),
                 ];
 
                 for (layer, bgcolor, _, width)  in &road_layers {
@@ -878,8 +933,11 @@ fn main() {
         {
             // For debugging label culling
             if false {
-                for (i, _label) in labels.iter().enumerate() {
+                for (i, label) in labels.iter().enumerate() {
                     let bbox = &boxes[i];
+
+                    let mut color = Color(360.0/10.0 * label.rank as f32, 1.0, 1.0, 1.0);
+                    hsv2rgb(&mut color);
 
                     let mut size = bbox.max.clone();
                     size -= bbox.min;
@@ -890,7 +948,7 @@ fn main() {
                     // @HACK This is just because the border layer is a hack as well.
                     entity_to_screen.scale(&Vector2::new(size.x as f32/border.extent as f32, size.y as f32/border.extent as f32));
                     let gl_proj = projection.to_gl();
-                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &Color(0.0, 1.0, 1.0, 1.0), 1.0, &mut font, 0.0);
+                    render_poly(&shader_program, &font_shader, Some(&gl_proj), &entity_to_screen, &border.layers[LayerType::ROADS as usize], &color, 1.0, &mut font, 0.0);
                 }
             }
 
@@ -925,6 +983,7 @@ fn main() {
 
             desired_visible.sort();
 
+            // Reset the goals, we'll set them again later
             for (_, x) in fader_binds.iter_mut() {
                 x.goal = 0.0;
             }
@@ -949,6 +1008,8 @@ fn main() {
                     0.0
                 };
 
+                // @PERF: Do we really need to set the fades multiple times? Shouldn't we just have
+                // a single global cutoff for the fade?
                 if let Some(x) = &label.opacity_from {
                     let label_data = fader_binds.get_mut(&tile.fades[*x].key).unwrap();
                     label_data.goal = label_data.goal.max(target_opacity);
@@ -957,8 +1018,13 @@ fn main() {
                 }
             }
 
-            // Step the shared fades
+            // Step the global fades
             for (_, x) in fader_binds.iter_mut() {
+                x.opacity = lerp(x.opacity, x.goal, 0.1);
+            }
+
+            // Step the tile fades
+            for (_, x) in tile_faders.iter_mut() {
                 x.opacity = lerp(x.opacity, x.goal, 0.1);
             }
 
@@ -1059,6 +1125,13 @@ fn main() {
 }
 
 pub struct Color(f32, f32, f32, f32);
+
+impl Color {
+    fn set_alpha(self, alpha: f32) -> Self {
+        let Color(r, g, b, a) = self;
+        return Color(r * alpha, g * alpha, b * alpha, a * alpha);
+    }
+}
 
 struct DisplayState {
     size_change: bool,
