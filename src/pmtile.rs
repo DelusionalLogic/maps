@@ -250,7 +250,7 @@ impl<'a> PMTile {
                 let mut slice = BinarySlice::from_read_decompress(&mut self.file, &self.internal_compression, offset, len);
                 let dir = Directory::parse(&mut slice);
 
-                let mut dir = e.insert(dir);
+                let dir = e.insert(dir);
 
                 // Attach the new directory to the start of the lru
                 if let Some(mut x) = self.fdir {

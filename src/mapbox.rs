@@ -77,6 +77,7 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
         "landuse",
         "buildings",
         "places",
+        "pois",
     ];
 
     fn scan_for_layers<const COUNT: usize>(reader: &mut pbuf::Message, layer_names: [&str; COUNT]) -> pbuf::Result<[Option<pbuf::Message>; COUNT]> {
@@ -571,7 +572,7 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
                 pbuf::TypeAndTag{wtype: pbuf::WireType::EOM, ..} => { break; }
                 pbuf::TypeAndTag{wtype: pbuf::WireType::Len, tag: 2} => {
                     reader.enter_message()?;
-                    let mut skip = false;
+                    let mut point_count = 0;
                     let mut name_value = None;
                     while let Ok(field) = reader.next() {
                         match field {
@@ -599,25 +600,19 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
                                         let cnt = cmd >> 3;
                                         assert!(cnt >= 1);
 
-                                        assert!(state == 0);
-                                        state = 1;
-                                        let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
-                                        let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                        for _ in 0..cnt {
+                                            assert!(state == 0);
+                                            state = 1;
+                                            let x = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
+                                            let y = pbuf::decode_zig(it.next().unwrap().unwrap()) as f32;
 
-                                        // Discard any point feature that doesn't lie directly in
-                                        // our tile. We don't want points in the overlap region.
-                                        // 4096 is the extent of the tile
-                                        if x >= 0.0 && x < 4096.0 && y >= 0.0 && y < 4096.0 {
-                                            geom.data.push(Vector2::new(x, y));
-                                        } else {
-                                            skip = true;
-                                        }
-
-                                        // @COMPLETE @HACK Right now we just discard the other
-                                        // points in a multipoint
-                                        for _ in 0..cnt-1 {
-                                            pbuf::decode_zig(it.next().unwrap().unwrap());
-                                            pbuf::decode_zig(it.next().unwrap().unwrap());
+                                            // Discard any point feature that doesn't lie directly in
+                                            // our tile. We don't want points in the overlap region.
+                                            // 4096 is the extent of the tile
+                                            if x >= 0.0 && x < 4096.0 && y >= 0.0 && y < 4096.0 {
+                                                geom.data.push(Vector2::new(x, y));
+                                                point_count += 1;
+                                            }
                                         }
                                     } else {
                                         panic!("Unknown command");
@@ -629,10 +624,14 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
                         }
                     }
 
-                    if !skip {
-                        if let Some(x) = name_value {
+                    if let Some(x) = name_value {
+                        for _ in 0..point_count {
                             names.push(x);
                         }
+                    } else {
+                        // If we didn't manage to fine a name for this feature, we discard all the
+                        // points
+                        geom.data.truncate(geom.data.len() - point_count)
                     }
 
                 }
@@ -716,6 +715,10 @@ pub fn parse_tile(reader: &mut pbuf::Message) -> pbuf::Result<RawTile> {
     };
 
     if let Some(layer) = &mut layer_messages[5] {
+        read_point_layer(layer, &mut tile)?;
+    }
+
+    if let Some(layer) = &mut layer_messages[6] {
         read_point_layer(layer, &mut tile)?;
     }
 

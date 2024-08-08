@@ -786,7 +786,7 @@ impl ActiveTriangulation {
             // and will therefore be each other adjecents. They'll have recoded the old triangle
             // though, so we go into them here and patch them directly
             if upper[i] == upper[i-2] {
-                println!("{} and {} share an edge", i, i-2);
+                //println!("{} and {} share an edge", i, i-2);
                 let t1 = new_tri[i-1];
                 let t2 = new_tri[i];
                 // dbg!(t1, t2, self.tris[t1.tri], self.tris[t2.tri]);
